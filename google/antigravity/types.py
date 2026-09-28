@@ -507,17 +507,17 @@ class CapabilitiesConfig(pydantic.BaseModel):
       overhead for small-context models. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
-      (all tools enabled except ASK_QUESTION, SEARCH_DIR, and FIND_FILE).
-      Disabled tools are removed from the model's context, saving tokens and
-      preventing the model from even considering them.
+      (all tools enabled except ASK_QUESTION, LIST_DIR, SEARCH_DIR, and
+      FIND_FILE). Disabled tools are removed from the model's context, saving
+      tokens and preventing the model from even considering them.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When specified, the given tools are
-      subtracted from default() (which already excludes ASK_QUESTION,
+      subtracted from default() (which already excludes ASK_QUESTION, LIST_DIR,
       SEARCH_DIR, and FIND_FILE). When None, all default tools are enabled.
       Disabled tools are removed from the model's context, saving tokens and
       preventing the model from even considering them. Note that to enable
-      ASK_QUESTION, SEARCH_DIR, or FIND_FILE, they must be explicitly included
-      in enabled_tools.
+      ASK_QUESTION, LIST_DIR, SEARCH_DIR, or FIND_FILE, they must be explicitly
+      included in enabled_tools.
     compaction_threshold: (Deprecated) Configure
       CompactionConfig(token_threshold=...) directly on AgentConfig instead.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
