@@ -18,7 +18,6 @@ package genai;
 
 import "google/antigravity/proto/events.proto";
 import "google/antigravity/proto/hooks.proto";
-import "google/antigravity/proto/steps.proto";
 import "google/antigravity/proto/genai_json_annotations.proto";
 
 option features = { field_presence : IMPLICIT enum_type : OPEN utf8_validation : NONE };
@@ -35,15 +34,16 @@ message ExternalClientEvent {
         [(gaos.parsing.json_discriminator_value) = "interaction.complete"];
     .genai.CancelInteractionEvent cancel_interaction = 5
         [(gaos.parsing.json_discriminator_value) = "interaction.cancel"];
-    .genai.StepEvent step = 7
-        [(gaos.parsing.json_discriminator_value) = "step"];
     .genai.DisconnectEvent disconnect = 9
         [(gaos.parsing.json_discriminator_value) = "interaction.disconnect"];
+    .genai.InputEvent input = 11
+        [(gaos.parsing.json_discriminator_value) = "input"];
     .genai.CallHookResponse call_hook_response = 14;
+    .genai.FunctionResultEvent function_result = 15
+        [(gaos.parsing.json_discriminator_value) = "function_result"];
+    .genai.ElicitationResultEvent elicitation_result = 16
+        [(gaos.parsing.json_discriminator_value) = "elicitation_result"];
   }
-}
-message StepEvent {
-  .genai.Step step = 1;
 }
 message ExternalServerEvent {
   oneof event_type {
