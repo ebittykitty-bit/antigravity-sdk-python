@@ -1001,10 +1001,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             enabled_tools=types.BuiltinTools.read_only()
         )
       else:
-        cfg = types.CapabilitiesConfig(
-            enabled_tools=types.BuiltinTools.read_only(),
-            enable_subagents=False,
-        )
+        cfg = types.CapabilitiesConfig()
     return connection.resolve_active_tools(cfg)
 
   def _to_system_instructions_proto(
@@ -1029,14 +1026,15 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     max_depth = None
     allowed_subagents = []
 
-    if cfg is not None:
-      subagent_enabled = getattr(cfg, "enable_subagents", True) and (
+    if isinstance(cfg, types.CapabilitiesConfig):
+      subagent_enabled = cfg.enable_subagents and (
           types.BuiltinTools.START_SUBAGENT in active_tools
       )
-      max_depth = getattr(cfg, "max_subagent_depth", None)
+      max_depth = cfg.max_subagent_depth
       allowed_subagents = cfg.allowed_subagents or []
-    elif not is_subagent:
+    elif isinstance(cfg, types.SubagentCapabilities):
       subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+      allowed_subagents = cfg.allowed_subagents or []
 
     subagents_proto = localharness_pb2.SubagentsConfig(
         enabled=subagent_enabled,
@@ -1045,11 +1043,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     if max_depth is not None:
       subagents_proto.max_nesting_depth = max_depth
 
-    run_cmd_cfg = None
-    if cfg is not None:
-      run_cmd_cfg = getattr(cfg, "run_command_config", None) or getattr(
-          cfg, "run_command", None
-      )
+    run_cmd_cfg = getattr(cfg, "run_command_config", None) or getattr(
+        cfg, "run_command", None
+    )
     enable_daemon = (
         run_cmd_cfg.enable_daemons if run_cmd_cfg is not None else False
     )
@@ -1111,6 +1107,54 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         ),
     )
 
+  def _to_subagent_skills_config_proto(
+      self,
+      skills_config: (
+          types.SubagentSkillsConfig
+          | types.SubagentInheritSkillsConfig
+          | types.SubagentNoneSkillsConfig
+          | types.SubagentOverrideSkillsConfig
+          | None
+      ),
+  ) -> localharness_pb2.SubagentSkillsConfig | None:
+    """Converts SubagentSkillsConfig model into localharness SubagentSkillsConfig proto."""
+    if skills_config is None:
+      return None
+    if isinstance(skills_config, types.SubagentInheritSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(inherit_config=skills_config)
+    elif isinstance(skills_config, types.SubagentNoneSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(none_config=skills_config)
+    elif isinstance(skills_config, types.SubagentOverrideSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(override_config=skills_config)
+    res = localharness_pb2.SubagentSkillsConfig()
+    if skills_config.none_config is not None:
+      res.none_config.SetInParent()
+    elif skills_config.inherit_config is not None:
+      res.inherit_config.SetInParent()
+      if skills_config.inherit_config.skill_names:
+        res.inherit_config.skill_names.extend(
+            skills_config.inherit_config.skill_names
+        )
+      if skills_config.inherit_config.extra_skills_paths:
+        res.inherit_config.extra_skills_paths.extend(
+            skills_config.inherit_config.extra_skills_paths
+        )
+    elif skills_config.override_config is not None:
+      res.override_config.SetInParent()
+      if skills_config.override_config.skills_paths:
+        res.override_config.skills_paths.extend(
+            skills_config.override_config.skills_paths
+        )
+      if skills_config.override_config.inline_skills:
+        raise ValueError(
+            "inline_skills in SubagentOverrideSkillsConfig is not supported"
+            " by LocalConnectionStrategy; use AntigravityProdActorAgentConfig or"
+            " skills_paths instead."
+        )
+    else:
+      return None
+    return res
+
   def _build_custom_subagents_protos(
       self,
       all_tool_protos: dict[str, localharness_pb2.Tool],
@@ -1118,9 +1162,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     """Resolves and builds CustomAgent configuration protos for subagents."""
     custom_agents_protos = []
     for subagent in self._subagents:
-      capabilities = subagent.capabilities or types.SubagentCapabilities(
-          enabled_tools=types.BuiltinTools.read_only(),
-      )
+      capabilities = subagent.capabilities
 
       resolved_subagent_tools = []
       for tool in subagent.tools or []:
@@ -1139,30 +1181,33 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
               f"Invalid tool type in subagent '{subagent.name}' tools list:"
               f" {tool}"
           )
-
-      model_proto = None
+      agent_behavior = (
+          capabilities.agent_behavior
+          if capabilities is not None
+          else types.AgentBehavior.AUTONOMOUS
+      )
+      custom_agent_pb = localharness_pb2.CustomAgent(
+          name=subagent.name,
+          description=subagent.description,
+          system_instructions=self._to_subagent_system_instructions_proto(
+              subagent.system_instructions
+          ),
+          harness_side_tools=self._to_harness_side_tools_proto(
+              capabilities, is_subagent=True
+          ),
+          tools=resolved_subagent_tools,
+          agent_behavior=to_proto_agent_behavior(agent_behavior),
+      )
       if subagent.model is not None:
         # Subagents pin a model name only; they always run against the
         # agent-level endpoint. See localharness/subagent.go.
-        model_proto = localharness_pb2.ModelConfig(name=subagent.model)
-
-      custom_agents_protos.append(
-          localharness_pb2.CustomAgent(
-              name=subagent.name,
-              description=subagent.description,
-              system_instructions=self._to_subagent_system_instructions_proto(
-                  subagent.system_instructions
-              ),
-              harness_side_tools=self._to_harness_side_tools_proto(
-                  capabilities, is_subagent=True
-              ),
-              tools=resolved_subagent_tools,
-              agent_behavior=to_proto_agent_behavior(
-                  capabilities.agent_behavior
-              ),
-              model=model_proto,
-          )
+        custom_agent_pb.model.name = subagent.model
+      skills_proto = self._to_subagent_skills_config_proto(
+          subagent.skills_config
       )
+      if skills_proto is not None:
+        custom_agent_pb.skills_config.CopyFrom(skills_proto)
+      custom_agents_protos.append(custom_agent_pb)
     return custom_agents_protos
 
   def _build_harness_config(self) -> localharness_pb2.HarnessConfig:

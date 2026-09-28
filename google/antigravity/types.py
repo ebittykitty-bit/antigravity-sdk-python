@@ -56,6 +56,11 @@ __all__ = [
     "CustomSystemInstructions",
     "TemplatedSystemInstructions",
     "SystemInstructions",
+    "InlineSkill",
+    "SubagentInheritSkillsConfig",
+    "SubagentNoneSkillsConfig",
+    "SubagentOverrideSkillsConfig",
+    "SubagentSkillsConfig",
     "SubagentConfig",
     "SubagentCapabilities",
     "AgentBehavior",
@@ -289,6 +294,102 @@ class SubagentCapabilities(pydantic.BaseModel):
     return self
 
 
+class InlineSkill(pydantic.BaseModel):
+  """Definition of an inline skill.
+
+  Attributes:
+    name: Unique name of the skill (e.g. 'emoji-summarizer').
+    description: Guidance for when the model should select this skill.
+    content: Markdown/text body containing the skill instructions.
+    allowed_tools: Optional list of tool names permitted for this skill.
+    dependent_tools: Optional list of tool names that this skill depends on
+      (loaded dynamically when the skill is looked up).
+    dependent_skills: Optional list of skill names that this skill depends on.
+    metadata: Optional key-value metadata for the skill (e.g. {'visibility':
+      'hidden'}).
+  """
+
+  name: str
+  description: str
+  content: str
+  allowed_tools: list[str] = pydantic.Field(default_factory=list)
+  dependent_tools: list[str] = pydantic.Field(default_factory=list)
+  dependent_skills: list[str] = pydantic.Field(default_factory=list)
+  metadata: dict[str, str] = pydantic.Field(default_factory=dict)
+
+
+class SubagentInheritSkillsConfig(pydantic.BaseModel):
+  """Inherits parent skills, optionally filtered by name or augmented with extra paths.
+
+  Attributes:
+    skill_names: Optional allowlist of skill names inherited from the parent
+      agent. If empty, all parent skills are inherited.
+    extra_skills_paths: Optional additional filesystem paths containing SKILL.md
+      files.
+  """
+
+  skill_names: list[str] = pydantic.Field(default_factory=list)
+  extra_skills_paths: list[str] = pydantic.Field(default_factory=list)
+
+
+class SubagentNoneSkillsConfig(pydantic.BaseModel):
+  """Disables all skills (and lookup_skill) for this subagent."""
+
+
+class SubagentOverrideSkillsConfig(pydantic.BaseModel):
+  """Replaces parent skills with an explicit set of paths and/or inline skills.
+
+  Attributes:
+    skills_paths: Filesystem directories containing SKILL.md files for this
+      subagent.
+    inline_skills: Inline skill definitions scoped exclusively to this subagent.
+  """
+
+  skills_paths: list[str] = pydantic.Field(default_factory=list)
+  inline_skills: list[InlineSkill] = pydantic.Field(default_factory=list)
+
+  @pydantic.model_validator(mode="after")
+  def _validate_non_empty(self) -> "SubagentOverrideSkillsConfig":
+    if not self.skills_paths and not self.inline_skills:
+      raise ValueError(
+          "SubagentOverrideSkillsConfig requires at least one of skills_paths"
+          " or inline_skills to be non-empty. Use SubagentNoneSkillsConfig to"
+          " disable all skills."
+      )
+    return self
+
+
+class SubagentSkillsConfig(pydantic.BaseModel):
+  """Configuration for how a subagent discovers and accesses skills.
+
+  At most one of inherit_config, none_config, or override_config may be set.
+  If unset, the subagent inherits all parent skills by default.
+
+  Attributes:
+    inherit_config: Inherit parent skills (optionally filtered by skill_names).
+    none_config: Disable all skills for this subagent.
+    override_config: Replace parent skills with explicit paths or inline skills.
+  """
+
+  inherit_config: SubagentInheritSkillsConfig | None = None
+  none_config: SubagentNoneSkillsConfig | None = None
+  override_config: SubagentOverrideSkillsConfig | None = None
+
+  @pydantic.model_validator(mode="after")
+  def _validate_oneof(self) -> "SubagentSkillsConfig":
+    set_fields = [
+        f
+        for f in ("inherit_config", "none_config", "override_config")
+        if getattr(self, f) is not None
+    ]
+    if len(set_fields) > 1:
+      raise ValueError(
+          "At most one of inherit_config, none_config, or override_config may"
+          f" be set; got {set_fields}."
+      )
+    return self
+
+
 class SubagentConfig(pydantic.BaseModel):
   """Configuration for a static subagent.
 
@@ -308,6 +409,8 @@ class SubagentConfig(pydantic.BaseModel):
       subagent to run under the given model instead of inheriting the parent
       agent's model. Unlike the agent-level `model`, this accepts a name only:
       subagents always run against the agent-level endpoint.
+    skills_config: Optional configuration for how this subagent discovers and
+      accesses skills (inherit, none, or override).
   """
 
   name: str
@@ -318,6 +421,59 @@ class SubagentConfig(pydantic.BaseModel):
       default_factory=list
   )
   model: str | None = None
+  skills_config: (
+      SubagentSkillsConfig
+      | SubagentInheritSkillsConfig
+      | SubagentNoneSkillsConfig
+      | SubagentOverrideSkillsConfig
+      | None
+  ) = None
+
+  @pydantic.field_validator("skills_config", mode="before")
+  @classmethod
+  def _coerce_skills_config(cls, v: Any) -> Any:
+    if isinstance(v, SubagentInheritSkillsConfig):
+      return SubagentSkillsConfig(inherit_config=v)
+    if isinstance(v, SubagentNoneSkillsConfig):
+      return SubagentSkillsConfig(none_config=v)
+    if isinstance(v, SubagentOverrideSkillsConfig):
+      return SubagentSkillsConfig(override_config=v)
+    if isinstance(v, dict):
+      has_nested = any(
+          k in v for k in ("inherit_config", "none_config", "override_config")
+      )
+      has_inherit = any(k in v for k in ("skill_names", "extra_skills_paths"))
+      has_override = any(k in v for k in ("skills_paths", "inline_skills"))
+      if has_nested and (has_inherit or has_override):
+        raise ValueError(
+            "Cannot mix nested SubagentSkillsConfig keys (inherit_config,"
+            " none_config, override_config) with shorthand keys in the same"
+            " skills_config dict."
+        )
+      if has_nested:
+        return SubagentSkillsConfig.model_validate(v)
+      if has_inherit and has_override:
+        raise ValueError(
+            "Cannot mix SubagentInheritSkillsConfig fields (skill_names,"
+            " extra_skills_paths) and SubagentOverrideSkillsConfig fields"
+            " (skills_paths, inline_skills) in the same skills_config dict."
+        )
+      if has_inherit:
+        return SubagentSkillsConfig(
+            inherit_config=SubagentInheritSkillsConfig.model_validate(v)
+        )
+      if has_override:
+        return SubagentSkillsConfig(
+            override_config=SubagentOverrideSkillsConfig.model_validate(v)
+        )
+      if v:
+        raise ValueError(
+            f"Unrecognized keys in skills_config dict: {sorted(v.keys())}."
+            " Expected either nested keys ('inherit_config', 'none_config',"
+            " 'override_config') or shorthand keys ('skill_names',"
+            " 'extra_skills_paths', 'skills_paths', 'inline_skills')."
+        )
+    return v
 
 
 class BuiltinTools(str, enum.Enum):

@@ -6264,6 +6264,198 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertIsInstance(config.capabilities, types.CapabilitiesConfig)
     self.assertIsNone(config.conversation_id)
 
+  def test_subagent_skills_config_translation(self):
+    subagents = [
+        types.SubagentConfig(
+            name="none_sub",
+            description="No skills",
+            skills_config=types.SubagentNoneSkillsConfig(),
+        ),
+        types.SubagentConfig(
+            name="inherit_sub",
+            description="Scoped inherit",
+            skills_config=types.SubagentInheritSkillsConfig(
+                skill_names=["format_ghidra"],
+                extra_skills_paths=["/tmp/extra"],
+            ),
+        ),
+        types.SubagentConfig(
+            name="empty_inherit_sub",
+            description="Unfiltered inherit",
+            skills_config=types.SubagentInheritSkillsConfig(),
+        ),
+        types.SubagentConfig(
+            name="override_sub",
+            description="Override skills",
+            skills_config=types.SubagentOverrideSkillsConfig(
+                skills_paths=["/custom/skills"],
+            ),
+        ),
+        types.SubagentConfig(
+            name="default_sub",
+            description="Default skills (None)",
+            skills_config=None,
+        ),
+        types.SubagentConfig(
+            name="empty_cfg_sub",
+            description="Default skills (empty SubagentSkillsConfig)",
+            skills_config=types.SubagentSkillsConfig(),
+        ),
+    ]
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=subagents,
+        workspaces=[str(self.workspace)],
+    )
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 6)
+
+    none_sub = harness_config.custom_subagents[0]
+    self.assertEqual(none_sub.skills_config.WhichOneof("mode"), "none_config")
+
+    inherit_sub = harness_config.custom_subagents[1]
+    self.assertEqual(
+        inherit_sub.skills_config.WhichOneof("mode"), "inherit_config"
+    )
+    self.assertEqual(
+        list(inherit_sub.skills_config.inherit_config.skill_names),
+        ["format_ghidra"],
+    )
+    self.assertEqual(
+        list(inherit_sub.skills_config.inherit_config.extra_skills_paths),
+        ["/tmp/extra"],
+    )
+
+    empty_inherit_sub = harness_config.custom_subagents[2]
+    self.assertTrue(empty_inherit_sub.skills_config.HasField("inherit_config"))
+    self.assertEqual(
+        empty_inherit_sub.skills_config.WhichOneof("mode"), "inherit_config"
+    )
+
+    override_sub = harness_config.custom_subagents[3]
+    self.assertEqual(
+        override_sub.skills_config.WhichOneof("mode"), "override_config"
+    )
+    self.assertEqual(
+        list(override_sub.skills_config.override_config.skills_paths),
+        ["/custom/skills"],
+    )
+
+    default_sub = harness_config.custom_subagents[4]
+    self.assertFalse(default_sub.HasField("skills_config"))
+
+    empty_cfg_sub = harness_config.custom_subagents[5]
+    self.assertFalse(empty_cfg_sub.HasField("skills_config"))
+
+    direct_none = strategy._to_subagent_skills_config_proto(
+        types.SubagentNoneSkillsConfig()
+    )
+    self.assertIsNotNone(direct_none)
+    self.assertEqual(direct_none.WhichOneof("mode"), "none_config")
+
+    direct_inherit = strategy._to_subagent_skills_config_proto(
+        types.SubagentInheritSkillsConfig(skill_names=["direct_skill"])
+    )
+    self.assertIsNotNone(direct_inherit)
+    self.assertEqual(direct_inherit.WhichOneof("mode"), "inherit_config")
+    self.assertEqual(
+        list(direct_inherit.inherit_config.skill_names), ["direct_skill"]
+    )
+
+    direct_override = strategy._to_subagent_skills_config_proto(
+        types.SubagentOverrideSkillsConfig(skills_paths=["/direct/path"])
+    )
+    self.assertIsNotNone(direct_override)
+    self.assertEqual(direct_override.WhichOneof("mode"), "override_config")
+    self.assertEqual(
+        list(direct_override.override_config.skills_paths), ["/direct/path"]
+    )
+
+    override_no_paths = types.SubagentOverrideSkillsConfig.model_construct(
+        skills_paths=[], inline_skills=[]
+    )
+    direct_override_no_paths = strategy._to_subagent_skills_config_proto(
+        types.SubagentSkillsConfig.model_construct(
+            override_config=override_no_paths
+        )
+    )
+    self.assertIsNotNone(direct_override_no_paths)
+    self.assertTrue(direct_override_no_paths.HasField("override_config"))
+    self.assertEqual(
+        direct_override_no_paths.WhichOneof("mode"), "override_config"
+    )
+
+  def test_subagent_skills_config_inline_skills_unsupported(self):
+    subagent = types.SubagentConfig(
+        name="inline_sub",
+        description="Inline override",
+        skills_config=types.SubagentOverrideSkillsConfig(
+            inline_skills=[
+                types.InlineSkill(
+                    name="re_skill",
+                    description="RE skill",
+                    content="# RE instructions",
+                )
+            ],
+        ),
+    )
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "inline_skills in SubagentOverrideSkillsConfig is not supported",
+    ):
+      strategy._build_harness_config()
+
+  def test_subagent_default_capabilities_read_only_tools(self):
+    """Verifies subagents with capabilities=None default to read-only tools."""
+    subagent = types.SubagentConfig(
+        name="readonly_sub",
+        description="A subagent with default capabilities",
+    )
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertTrue(custom_agent.harness_side_tools.view_file.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.list_dir.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.find.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.file_edit.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.write_to_file.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.run_command.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.user_questions.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
+
+  def test_resolve_active_tools_and_harness_side_tools_none_cfg(self):
+    strategy = local_connection.LocalConnectionStrategy(
+        workspaces=[str(self.workspace)],
+    )
+    # Top-level default (CapabilitiesConfig)
+    tools = strategy._resolve_active_tools(None, is_subagent=False)
+    self.assertEqual(
+        tools,
+        local_connection.connection.resolve_active_tools(
+            types.CapabilitiesConfig()
+        ),
+    )
+    harness_tools = strategy._to_harness_side_tools_proto(
+        None, is_subagent=False
+    )
+    self.assertTrue(harness_tools.run_command.enabled)
+
+    # Subagent default (SubagentCapabilities read-only)
+    sub_tools = strategy._resolve_active_tools(None, is_subagent=True)
+    self.assertEqual(sub_tools, set(types.BuiltinTools.read_only()))
+    sub_harness_tools = strategy._to_harness_side_tools_proto(
+        None, is_subagent=True
+    )
+    self.assertTrue(sub_harness_tools.view_file.enabled)
+    self.assertFalse(sub_harness_tools.run_command.enabled)
+
 
 class _EvalProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
   daemon_threads = True

@@ -2651,5 +2651,235 @@ class StopHookTypesTest(absltest.TestCase):
     self.assertEqual(args.stop_reason, types.StopReason.QUOTA_EXHAUSTED)
 
 
+class SubagentSkillsConfigTest(unittest.TestCase):
+  """Validates SubagentSkillsConfig and SubagentConfig.skills_config."""
+
+  def test_subagent_skills_config_oneof_valid(self):
+    cfg_empty = types.SubagentSkillsConfig()
+    self.assertIsNone(cfg_empty.inherit_config)
+    self.assertIsNone(cfg_empty.none_config)
+    self.assertIsNone(cfg_empty.override_config)
+
+    cfg_inherit = types.SubagentSkillsConfig(
+        inherit_config=types.SubagentInheritSkillsConfig(
+            skill_names=["format_ghidra"],
+            extra_skills_paths=["/tmp/skills"],
+        )
+    )
+    self.assertIsNotNone(cfg_inherit.inherit_config)
+    self.assertEqual(cfg_inherit.inherit_config.skill_names, ["format_ghidra"])
+    self.assertEqual(
+        cfg_inherit.inherit_config.extra_skills_paths, ["/tmp/skills"]
+    )
+
+    cfg_none = types.SubagentSkillsConfig(
+        none_config=types.SubagentNoneSkillsConfig()
+    )
+    self.assertIsNotNone(cfg_none.none_config)
+
+    cfg_override = types.SubagentSkillsConfig(
+        override_config=types.SubagentOverrideSkillsConfig(
+            skills_paths=["/custom/skills"],
+            inline_skills=[
+                types.InlineSkill(
+                    name="re_skill",
+                    description="RE skill",
+                    content="# RE instructions",
+                )
+            ],
+        )
+    )
+    self.assertIsNotNone(cfg_override.override_config)
+    self.assertEqual(len(cfg_override.override_config.inline_skills), 1)
+    self.assertEqual(
+        cfg_override.override_config.inline_skills[0].name, "re_skill"
+    )
+
+  def test_subagent_override_skills_config_empty_rejected(self):
+    with self.assertRaisesRegex(
+        ValueError, "requires at least one of skills_paths or inline_skills"
+    ):
+      types.SubagentOverrideSkillsConfig()
+
+  def test_subagent_skills_config_oneof_violation(self):
+    inherit = types.SubagentInheritSkillsConfig()
+    none = types.SubagentNoneSkillsConfig()
+    override = types.SubagentOverrideSkillsConfig(skills_paths=["/skills"])
+
+    for kwargs in (
+        {"inherit_config": inherit, "none_config": none},
+        {"inherit_config": inherit, "override_config": override},
+        {"none_config": none, "override_config": override},
+        {
+            "inherit_config": inherit,
+            "none_config": none,
+            "override_config": override,
+        },
+    ):
+      expected_fields = list(kwargs.keys())
+      with self.subTest(kwargs=expected_fields):
+        with self.assertRaises(ValueError) as ctx:
+          types.SubagentSkillsConfig(**kwargs)
+        self.assertIn(f"got {expected_fields}", str(ctx.exception))
+
+  def test_subagent_config_coercion(self):
+    sub_inherit = types.SubagentConfig(
+        name="sub1",
+        description="desc",
+        skills_config=types.SubagentInheritSkillsConfig(
+            skill_names=["format_ghidra"]
+        ),
+    )
+    self.assertIsInstance(sub_inherit.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_inherit.skills_config.inherit_config)
+    self.assertEqual(
+        sub_inherit.skills_config.inherit_config.skill_names, ["format_ghidra"]
+    )
+
+    sub_none = types.SubagentConfig(
+        name="sub2",
+        description="desc",
+        skills_config=types.SubagentNoneSkillsConfig(),
+    )
+    self.assertIsInstance(sub_none.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_none.skills_config.none_config)
+
+    sub_override = types.SubagentConfig(
+        name="sub3",
+        description="desc",
+        skills_config=types.SubagentOverrideSkillsConfig(
+            skills_paths=["/skills"]
+        ),
+    )
+    self.assertIsInstance(
+        sub_override.skills_config, types.SubagentSkillsConfig
+    )
+    self.assertIsNotNone(sub_override.skills_config.override_config)
+    self.assertEqual(
+        sub_override.skills_config.override_config.skills_paths, ["/skills"]
+    )
+
+    sub_direct = types.SubagentConfig(
+        name="sub4",
+        description="desc",
+        skills_config=types.SubagentSkillsConfig(
+            none_config=types.SubagentNoneSkillsConfig()
+        ),
+    )
+    self.assertIsInstance(sub_direct.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_direct.skills_config.none_config)
+
+    sub_dict_inherit_names = types.SubagentConfig.model_validate({
+        "name": "sub5a",
+        "description": "desc",
+        "skills_config": {"skill_names": ["format_ghidra"]},
+    })
+    self.assertEqual(
+        sub_dict_inherit_names.skills_config.inherit_config.skill_names,
+        ["format_ghidra"],
+    )
+
+    sub_dict_inherit_paths = types.SubagentConfig.model_validate({
+        "name": "sub5b",
+        "description": "desc",
+        "skills_config": {"extra_skills_paths": ["/extra"]},
+    })
+    self.assertEqual(
+        sub_dict_inherit_paths.skills_config.inherit_config.extra_skills_paths,
+        ["/extra"],
+    )
+
+    sub_dict_override_paths = types.SubagentConfig.model_validate({
+        "name": "sub6a",
+        "description": "desc",
+        "skills_config": {"skills_paths": ["/skills"]},
+    })
+    self.assertEqual(
+        sub_dict_override_paths.skills_config.override_config.skills_paths,
+        ["/skills"],
+    )
+
+    sub_dict_override_inline = types.SubagentConfig.model_validate({
+        "name": "sub6b",
+        "description": "desc",
+        "skills_config": {
+            "inline_skills": [{"name": "s", "description": "d", "content": "c"}]
+        },
+    })
+    self.assertEqual(
+        len(
+            sub_dict_override_inline.skills_config.override_config.inline_skills
+        ),
+        1,
+    )
+
+    sub_dict_nested_inherit = types.SubagentConfig.model_validate({
+        "name": "sub7a",
+        "description": "desc",
+        "skills_config": {"inherit_config": {"skill_names": ["a"]}},
+    })
+    self.assertEqual(
+        sub_dict_nested_inherit.skills_config.inherit_config.skill_names, ["a"]
+    )
+
+    sub_dict_nested_none = types.SubagentConfig.model_validate({
+        "name": "sub7b",
+        "description": "desc",
+        "skills_config": {"none_config": {}},
+    })
+    self.assertIsNotNone(sub_dict_nested_none.skills_config.none_config)
+
+    sub_dict_nested_override = types.SubagentConfig.model_validate({
+        "name": "sub7c",
+        "description": "desc",
+        "skills_config": {"override_config": {"skills_paths": ["/s"]}},
+    })
+    self.assertEqual(
+        sub_dict_nested_override.skills_config.override_config.skills_paths,
+        ["/s"],
+    )
+
+    with self.assertRaisesRegex(ValueError, "Cannot mix"):
+      types.SubagentConfig.model_validate({
+          "name": "sub_mixed_shorthand",
+          "description": "desc",
+          "skills_config": {
+              "skill_names": ["a"],
+              "skills_paths": ["/skills"],
+          },
+      })
+
+    with self.assertRaisesRegex(ValueError, "Cannot mix nested"):
+      types.SubagentConfig.model_validate({
+          "name": "sub_mixed_nested_and_shorthand",
+          "description": "desc",
+          "skills_config": {
+              "inherit_config": {"skill_names": ["a"]},
+              "skills_paths": ["/skills"],
+          },
+      })
+
+    with self.assertRaisesRegex(
+        ValueError, "At most one of inherit_config, none_config"
+    ):
+      types.SubagentConfig.model_validate({
+          "name": "sub_nested_oneof_violation",
+          "description": "desc",
+          "skills_config": {
+              "inherit_config": {},
+              "none_config": {},
+          },
+      })
+
+    with self.assertRaisesRegex(
+        ValueError, "Unrecognized keys in skills_config dict"
+    ):
+      types.SubagentConfig.model_validate({
+          "name": "sub_unrecognized_keys",
+          "description": "desc",
+          "skills_config": {"skills_path": ["/skills"]},
+      })
+
+
 if __name__ == "__main__":
   absltest.main()
