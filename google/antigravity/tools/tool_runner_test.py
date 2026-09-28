@@ -308,6 +308,17 @@ class ToolRunnerTest(absltest.TestCase):
     self.assertIs(inspect.unwrap(nested), custom_func)
     self.assertEqual(inspect.signature(nested), sig)
 
+  def test_tool_with_schema_repr(self):
+    """Verifies ToolWithSchema.__repr__ produces an informative string representation."""
+
+    def sample_func(a: int) -> int:
+      return a
+
+    schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+    tool = tool_runner.ToolWithSchema(sample_func, schema)
+    expected = f"ToolWithSchema(fn={sample_func!r}, input_schema={schema!r})"
+    self.assertEqual(repr(tool), expected)
+
   def test_coerce_args_basic_types(self):
     """Verifies that _coerce_args converts strings to basic Python types."""
 

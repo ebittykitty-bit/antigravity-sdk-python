@@ -250,6 +250,9 @@ class ToolWithSchema:
   def __call__(self, *args: Any, **kwargs: Any) -> Any:
     return self.fn(*args, **kwargs)
 
+  def __repr__(self) -> str:
+    return f"ToolWithSchema(fn={self.fn!r}, input_schema={self.input_schema!r})"
+
 
 def _is_async(callable_obj: Any) -> bool:
   """Returns True if the callable is async (coroutine function or __call__)."""
