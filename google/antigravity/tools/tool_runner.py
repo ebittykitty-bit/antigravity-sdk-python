@@ -101,14 +101,12 @@ def _is_tool_context_ast_node(node: ast.AST) -> bool:
     return _is_tool_context_ast_node(node.left) or _is_tool_context_ast_node(
         node.right
     )
-  if isinstance(node, ast.Subscript) and isinstance(
-      node.value, (ast.Name, ast.Attribute)
-  ):
-    wrapper = (
-        node.value.id
-        if isinstance(node.value, ast.Name)
-        else node.value.attr
-    )
+  if isinstance(node, ast.Subscript):
+    wrapper = None
+    if isinstance(node.value, ast.Name):
+      wrapper = node.value.id
+    elif isinstance(node.value, ast.Attribute):
+      wrapper = node.value.attr
     if wrapper == "Optional":
       return _is_tool_context_ast_node(node.slice)
     if wrapper == "Union":

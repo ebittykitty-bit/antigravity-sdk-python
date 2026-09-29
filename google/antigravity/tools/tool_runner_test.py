@@ -1000,6 +1000,21 @@ class ContextInjectionTest(absltest.TestCase):
             "Optional[tool_context.ToolContext]"
         )
     )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "typing.Optional[ToolContext]"
+        )
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "typing.Union[str, ToolContext]"
+        )
+    )
+    self.assertTrue(
+        tool_runner._is_tool_context_annotation(
+            "typing.Annotated[ToolContext, 'meta']"
+        )
+    )
     # Annotated types
     self.assertTrue(
         tool_runner._is_tool_context_annotation(
