@@ -173,6 +173,7 @@ message Payload {
     .genai.InputEvent input = 207
         [(gaos.parsing.json_discriminator_value) = "input"];
     .genai.StateUpdate state_update = 13;
+    .genai.Interaction.Usage usage_update = 30;
     .genai.FunctionInvocation function_invocation = 14;
     .genai.CallHookRequest call_hook_request = 15;
     .genai.CapabilitiesUpdate capabilities_update = 17;
