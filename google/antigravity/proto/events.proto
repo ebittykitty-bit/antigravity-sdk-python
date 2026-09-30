@@ -30,10 +30,6 @@ import "google/antigravity/proto/genai_json_annotations.proto";
 
 option features = { field_presence : IMPLICIT enum_type : OPEN utf8_validation : NONE };
 
-enum Mode {
-  MODE_UNSPECIFIED = 0;
-  LIVE = 1;
-}
 enum InputDeliveryMode {
   INPUT_DELIVERY_MODE_UNSPECIFIED = 0;
   QUEUE = 1;
