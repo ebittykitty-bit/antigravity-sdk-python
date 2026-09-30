@@ -14,6 +14,7 @@
 
 """Google Antigravity SDK for building AI agents."""
 
+from google.antigravity import beta
 from google.antigravity.agent import Agent
 from google.antigravity.connections.connection import AgentConfig
 from google.antigravity.connections.local.litert_connection_config import LiteRTAgentConfig
@@ -88,6 +89,7 @@ __all__ = [
     "VertexEndpoint",
     "Video",
     "ToolExecutionError",
+    "beta",
     "from_bytes",
     "from_file",
 ]

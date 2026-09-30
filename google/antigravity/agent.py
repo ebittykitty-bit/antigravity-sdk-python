@@ -17,8 +17,9 @@
 from collections.abc import Sequence
 import contextlib
 import logging
-from typing import cast
+from typing import ClassVar, cast
 
+from google.antigravity import beta as beta_lib
 from google.antigravity import types
 from google.antigravity.connections import connection as connection_module
 from google.antigravity.conversation import conversation as conversation_lib
@@ -33,6 +34,8 @@ __all__ = ["Agent"]
 
 class Agent:
   """High-level Agent API for simplified interaction."""
+
+  beta: ClassVar[beta_lib.BetaNamespace] = beta_lib.BetaNamespace()
 
   def __init__(self, config: connection_module.AgentConfig):
     """Initializes the Agent.
