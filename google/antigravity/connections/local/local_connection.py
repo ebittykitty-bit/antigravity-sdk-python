@@ -415,8 +415,7 @@ class LocalConnection(connection.Connection):
     # expected closures from harness crashes.
     self._disconnecting = False
 
-    self._processor = event_processor.LocalHarnessEventProcessor(
-        send_input_event_fn=self._send_input_event,
+    self._processor = self._create_event_processor(
         hook_runner=hook_runner,
         tool_runner=tool_runner,
         dynamic_policy_map=dynamic_policy_map,
@@ -431,6 +430,25 @@ class LocalConnection(connection.Connection):
     # error messages when the WebSocket closes unexpectedly.
     self._stderr_lines: collections.deque[str] = collections.deque(maxlen=100)
     self._stderr_thread: threading.Thread | None = None
+
+  def _create_event_processor(
+      self,
+      *,
+      hook_runner: h_runner.HookRunner | None,
+      tool_runner: t_runner.ToolRunner | None,
+      dynamic_policy_map: dict[str, "policy.Policy"] | None,
+      initial_usage: types.UsageMetadata | None,
+      initial_trajectory_usages: dict[str, types.UsageMetadata] | None,
+  ) -> event_processor.BaseLocalEventProcessor:
+    """Creates the protocol-specific event processor for this connection."""
+    return event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=self._send_input_event,
+        hook_runner=hook_runner,
+        tool_runner=tool_runner,
+        dynamic_policy_map=dynamic_policy_map,
+        initial_usage=initial_usage,
+        initial_trajectory_usages=initial_trajectory_usages,
+    )
 
   @property
   def is_idle(self) -> bool:
@@ -584,6 +602,12 @@ class LocalConnection(connection.Connection):
     t.start()
     self._stderr_thread = t
 
+  async def _send_session_end_request(self) -> None:
+    """Sends a session-end request to the harness before disconnecting."""
+    await self._send_input_event(
+        localharness_pb2.InputEvent(session_end_request=True)
+    )
+
   async def disconnect(self) -> None:
     """Tears down the harness connection in a careful order."""
     self._disconnecting = True
@@ -592,9 +616,7 @@ class LocalConnection(connection.Connection):
     # Dispatch session end hook before tearing down via Go localharness RPC.
     if self._hook_runner and self._hook_runner.on_session_end_hooks:
       try:
-        await self._send_input_event(
-            localharness_pb2.InputEvent(session_end_request=True)
-        )
+        await self._send_session_end_request()
         await self._processor.session_end_done.wait()
       except Exception as e:  # pylint: disable=broad-except
         hook_error = e
@@ -640,14 +662,18 @@ class LocalConnection(connection.Connection):
     event = localharness_pb2.InputEvent(halt_request=True)
     await self._send_input_event(event)
 
+  async def _parse_and_process_ws_message(self, raw_msg: str | bytes) -> None:
+    """Parses a raw WebSocket frame and routes it to the event processor."""
+    event = localharness_pb2.OutputEvent()
+    json_format.Parse(raw_msg, event)
+    await self._processor.process_event(event)
+
   async def _ws_reader_loop(self) -> None:
     """Reads OutputEvents from the WebSocket and delegates to processor."""
     try:
       async for raw_msg in self._ws:
         logging.debug("RAW WS MSG: %s", raw_msg)
-        event = localharness_pb2.OutputEvent()
-        json_format.Parse(raw_msg, event)
-        await self._processor.process_event(event)
+        await self._parse_and_process_ws_message(raw_msg)
     except websockets.ConnectionClosed as e:
       close_code = _get_ws_close_code(e)
       if self._disconnecting:
@@ -703,6 +729,9 @@ class LocalConnection(connection.Connection):
       self, tool_call: localharness_pb2.ToolCall
   ) -> None:
     """Handles tool execution and hook interception."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_tool_call(tool_call)
 
   def _tool_result_to_dict(self, result: types.ToolResult) -> dict[str, Any]:
@@ -713,12 +742,18 @@ class LocalConnection(connection.Connection):
       self, step_update: localharness_pb2.StepUpdate
   ) -> None:
     """Handles question requests from the harness."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_question_request(step_update)
 
   async def _handle_tool_confirmation_request(
       self, step_update: localharness_pb2.StepUpdate
   ) -> None:
     """Handles tool confirmation requests from the harness."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_tool_confirmation_request(step_update)
 
 
@@ -1210,6 +1245,12 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       custom_agents_protos.append(custom_agent_pb)
     return custom_agents_protos
 
+  def _default_app_data_dir(self) -> str:
+    """Returns the configured app_data_dir or the default local harness directory."""
+    return self._app_data_dir or str(
+        (pathlib.Path("~") / ".gemini" / "antigravity").expanduser().resolve()
+    )
+
   def _build_harness_config(self) -> localharness_pb2.HarnessConfig:
     """Translates Pydantic config objects into a HarnessConfig proto."""
     all_tool_protos = {}
@@ -1296,12 +1337,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         finish_tool_schema_json=(
             self._capabilities_config.finish_tool_schema_json or ""
         ),
-        app_data_dir=self._app_data_dir
-        or str(
-            (pathlib.Path("~") / ".gemini" / "antigravity")
-            .expanduser()
-            .resolve()
-        ),
+        app_data_dir=self._default_app_data_dir(),
         mcp_servers=mcp_server_protos,
         enabled_hooks=enabled_hooks,
         custom_subagents=custom_agents_protos,
@@ -1439,11 +1475,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         f" {_MAX_WEBSOCKET_CONNECT_RETRIES} attempts. Stderr: {stderr}"
     ) from last_exception
 
-  async def __aenter__(self) -> None:
-    """Starts the backend."""
-    self._validate_connection()
-
-    harness_config = self._build_harness_config()
+  async def _spawn_harness_and_connect_ws(
+      self, *, use_interactions_api: bool = False
+  ) -> tuple[subprocess.Popen[bytes], Any, str]:
+    """Spawns the localharness process, exchanges stdio config, and connects WS."""
     sdk_version = _get_sdk_version()
     client_info_proto = localharness_pb2.ClientInfo(
         language="python",
@@ -1460,6 +1495,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         client_info=client_info_proto,
         env=env_map,
     )
+    if use_interactions_api:
+      input_config.use_interactions_api = True
 
     merged_env = {**os.environ, **env_map} if self._env is not None else None
 
@@ -1494,6 +1531,15 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     ws, ws_url = await self._connect_websocket(
         output_config.port, output_config.api_key, process
     )
+    return process, ws, ws_url
+
+  async def __aenter__(self) -> None:
+    """Starts the backend."""
+    self._validate_connection()
+
+    harness_config = self._build_harness_config()
+    process, ws, ws_url = await self._spawn_harness_and_connect_ws()
+    assert process.stderr is not None
 
     try:
       init_event = localharness_pb2.InitializeConversationEvent(

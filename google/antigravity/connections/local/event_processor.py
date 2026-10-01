@@ -490,39 +490,30 @@ def parse_initialize_response(
   )
 
 
-class LocalHarnessEventProcessor:
-  """Processes OutputEvent messages from the local harness and routes them."""
+class BaseLocalEventProcessor:
+  """Base runtime engine for localharness event processors."""
 
   def __init__(
       self,
       *,
-      send_input_event_fn: Callable[
-          [localharness_pb2.InputEvent], Coroutine[Any, Any, None]
-      ],
       hook_runner: h_runner.HookRunner | None = None,
       tool_runner: t_runner.ToolRunner | None = None,
       dynamic_policy_map: dict[str, policy_lib.Policy] | None = None,
       initial_usage: types.UsageMetadata | None = None,
       initial_trajectory_usages: dict[str, types.UsageMetadata] | None = None,
   ):
-    self._send_input_event = send_input_event_fn
     self._hook_runner = hook_runner
     self._tool_runner = tool_runner
     self._dynamic_policy_map: dict[str, policy_lib.Policy] = (
         dynamic_policy_map or {}
     )
-    self.step_queue = asyncio.Queue()
+    self.step_queue: asyncio.Queue[Any] = asyncio.Queue()
     self.is_idle = asyncio.Event()
     self.is_idle.set()
     self.session_end_done = asyncio.Event()
-    self.main_trajectory_id = None
-    self._step_trackers: dict[tuple[str, int], _StepTracker] = {}
-    self._background_tasks = set()
-    self._hook_router = (
-        HookRouter(hook_runner, self._send_input_event, _extract_tool_result)
-        if hook_runner
-        else None
-    )
+    self.main_trajectory_id: str | None = None
+    self._background_tasks: set[asyncio.Task[Any]] = set()
+    self._current_turn_context: hooks.TurnContext | None = None
     self._cumulative_usage: types.UsageMetadata = (
         initial_usage.model_copy()
         if initial_usage is not None
@@ -569,14 +560,247 @@ class LocalHarnessEventProcessor:
 
   def _get_turn_context(self) -> hooks.TurnContext:
     assert self._hook_runner is not None
-    if self._hook_router and self._hook_router.current_turn_context:
-      return self._hook_router.current_turn_context
+    if self._current_turn_context:
+      return self._current_turn_context
     return hooks.TurnContext(self._hook_runner.session_context)
 
-  def _run_in_background(self, coro) -> None:
+  def _run_in_background(self, coro: Coroutine[Any, Any, Any]) -> None:
     t = asyncio.create_task(coro)
     self._background_tasks.add(t)
     t.add_done_callback(self._background_tasks.discard)
+
+  async def process_event(self, event: Any) -> None:
+    """Processes a protocol event from the harness."""
+    raise NotImplementedError
+
+  async def _emit_step(
+      self,
+      step_obj: LocalConnectionStep,
+      *,
+      dispatch_pre: bool = False,
+      dispatch_post: bool = False,
+  ) -> None:
+    """Enqueues a step (suppressing duplicate custom tool calls) and fires hooks."""
+    step_obj_for_queue = step_obj
+    if self._tool_runner and step_obj.tool_calls:
+      is_local_custom_tool = False
+      for tc in step_obj.tool_calls:
+        if tc.name in self._tool_runner.tool_names:
+          is_local_custom_tool = True
+          break
+
+      if is_local_custom_tool:
+        # During live execution of a local custom tool, the Go harness
+        # sends both a StepUpdate event with custom_tool and a websocket
+        # tool_call event. To prevent duplicate ToolCallStart events on the
+        # client, we suppress the tool calls from this StepUpdate before
+        # putting it in the queue.
+        #
+        # This filtering is done here rather than in from_dict() because
+        # during history resumption, from_dict() is called directly to load
+        # historical steps. Since no websocket tool_call events are replayed
+        # during resumption, from_dict() must parse the custom_tool from the
+        # history payload to reconstruct the steps in the session.
+        step_obj_for_queue = step_obj.model_copy(update={"tool_calls": []})
+
+    await self.step_queue.put(step_obj_for_queue)
+
+    # Record the main trajectory ID on the first step we see
+    if self.main_trajectory_id is None and step_obj.trajectory_id:
+      self.main_trajectory_id = step_obj.trajectory_id
+
+    # Dispatch Telemetry Internal Step Hooks
+    if dispatch_pre and self._hook_runner:
+      await self._hook_runner.dispatch_pre_step(
+          self._get_turn_context(), step_obj
+      )
+
+    if dispatch_post and self._hook_runner:
+      await self._hook_runner.dispatch_post_step(
+          self._get_turn_context(), step_obj
+      )
+
+  async def _execute_client_tool(
+      self, tc: types.ToolCall
+  ) -> types.ToolResult | None:
+    """Executes a single client-side tool call via ToolRunner if configured."""
+    if not self._tool_runner:
+      logging.warning(
+          "Received tool call %s but no tool runner is configured. "
+          "Yielding to user.",
+          tc.name,
+      )
+      return None
+    try:
+      results = await self._tool_runner.process_tool_calls([tc])
+      return results[0]
+    except Exception as e:  # pylint: disable=broad-except
+      return types.ToolResult(
+          id=tc.id,
+          name=tc.name,
+          error=str(e),
+          exception=e,
+      )
+
+  def tool_result_to_dict(self, result: types.ToolResult) -> dict[str, Any]:
+    """Converts a ToolResult to a dictionary representation."""
+    if result.error is not None:
+      return {"error": result.error}
+
+    output = result.result
+    if hasattr(output, "model_dump"):
+      output = output.model_dump(mode="json")
+    elif hasattr(output, "dict"):
+      output = output.dict()
+
+    try:
+      output = _ANY_ADAPTER.dump_python(output, mode="json")
+    except Exception:  # pylint: disable=broad-except
+      logging.warning(
+          "Pydantic serialization failed for tool result, falling back to"
+          " string",
+          exc_info=True,
+      )
+      output = str(output)
+
+    if not isinstance(output, dict):
+      return {"result": output}
+
+    return output
+
+  async def _dispatch_question_interaction(
+      self, questions_list: list[types.AskQuestionEntry]
+  ) -> types.QuestionHookResult | None:
+    """Dispatches an AskQuestionInteractionSpec to the HookRunner if present."""
+    if not self._hook_runner or not questions_list:
+      return None
+    ctx = self._get_turn_context()
+    _, question_res, _ = await self._hook_runner.dispatch_interaction(
+        turn_context=ctx,
+        interaction_spec=types.AskQuestionInteractionSpec(
+            questions=questions_list
+        ),
+    )
+    return question_res
+
+  async def _evaluate_dynamic_policy(
+      self,
+      rule_id: str,
+      reason: str,
+      tool_call: types.ToolCall,
+  ) -> tuple[localharness_pb2.PolicyEvaluationOutcome, str]:
+    """Evaluates a dynamic policy rule and returns (outcome, deny_reason)."""
+    p = self._dynamic_policy_map.get(rule_id)
+    if p is None:
+      logging.error("Unknown policy rule_id: %s", rule_id)
+      return (
+          localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+          f"Unknown rule_id: {rule_id}",
+      )
+
+    try:
+      # Evaluate the `when` predicate if present.
+      if p.when is not None:
+        predicate_matched = await policy_lib._evaluate_predicate(  # pylint: disable=protected-access
+            p, tool_call
+        )
+        if not predicate_matched:
+          return (
+              localharness_pb2.POLICY_EVALUATION_OUTCOME_NO_MATCH,
+              "",
+          )
+
+      # Apply the decision.
+      if p.ask_user is not None:
+        effective_reason = reason or p.reason
+        allow = await policy_lib._execute_ask_user(  # pylint: disable=protected-access
+            p, tool_call, reason=effective_reason
+        )
+        deny_msg = (
+            ""
+            if allow
+            else (effective_reason or f"Denied by user ({p.name or p.tool}).")
+        )
+        return (
+            (
+                localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW
+                if allow
+                else localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY
+            ),
+            deny_msg,
+        )
+      if p.decision == policy_lib.Decision.ASK_USER:
+        deny_msg = (
+            f"Policy '{p.name or p.tool}' requires ask_user handler, but none"
+            " was provided."
+        )
+        logging.error(deny_msg)
+        return (
+            localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+            deny_msg,
+        )
+      if p.decision == policy_lib.Decision.DENY:
+        deny_msg = reason or f"Denied by policy '{p.name or p.tool}'."
+        return (
+            localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+            deny_msg,
+        )
+      if p.decision == policy_lib.Decision.APPROVE:
+        return (
+            localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW,
+            "",
+        )
+      deny_msg = (
+          f"Unhandled policy decision '{p.decision}' for '{p.name or p.tool}'."
+      )
+      logging.error(deny_msg)
+      return (
+          localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+          deny_msg,
+      )
+    except Exception as e:  # pylint: disable=broad-except
+      logging.exception("Policy evaluation failed for rule_id=%s", rule_id)
+      return (
+          localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
+          f"Policy evaluation error: {e}",
+      )
+
+
+class LocalHarnessEventProcessor(BaseLocalEventProcessor):
+  """Processes OutputEvent messages from the local harness and routes them."""
+
+  def __init__(
+      self,
+      *,
+      send_input_event_fn: Callable[
+          [localharness_pb2.InputEvent], Coroutine[Any, Any, None]
+      ],
+      hook_runner: h_runner.HookRunner | None = None,
+      tool_runner: t_runner.ToolRunner | None = None,
+      dynamic_policy_map: dict[str, policy_lib.Policy] | None = None,
+      initial_usage: types.UsageMetadata | None = None,
+      initial_trajectory_usages: dict[str, types.UsageMetadata] | None = None,
+  ):
+    super().__init__(
+        hook_runner=hook_runner,
+        tool_runner=tool_runner,
+        dynamic_policy_map=dynamic_policy_map,
+        initial_usage=initial_usage,
+        initial_trajectory_usages=initial_trajectory_usages,
+    )
+    self._send_input_event = send_input_event_fn
+    self._hook_router = (
+        HookRouter(hook_runner, self._send_input_event, _extract_tool_result)
+        if hook_runner
+        else None
+    )
+    self._step_trackers: dict[tuple[str, int], _StepTracker] = {}
+
+  def _get_turn_context(self) -> hooks.TurnContext:
+    assert self._hook_runner is not None
+    if self._hook_router and self._hook_router.current_turn_context:
+      return self._hook_router.current_turn_context
+    return super()._get_turn_context()
 
   async def process_event(self, event: localharness_pb2.OutputEvent) -> None:
     """Processes OutputEvents from the harness, routes steps, and dispatches tools."""
@@ -622,58 +846,32 @@ class LocalHarnessEventProcessor:
       step_dict = json_format.MessageToDict(
           event.step_update, preserving_proto_field_name=True
       )
-      parsed_step = LocalConnectionStep.from_dict(step_dict)
-      step_obj = parsed_step
+      step_obj = LocalConnectionStep.from_dict(step_dict)
 
-      step_obj_for_queue = step_obj
-      if self._tool_runner and step_obj.tool_calls:
-        is_local_custom_tool = False
-        for tc in step_obj.tool_calls:
-          if tc.name in self._tool_runner.tool_names:
-            is_local_custom_tool = True
-            break
-
-        if is_local_custom_tool:
-          # During live execution of a local custom tool, the Go harness
-          # sends both a StepUpdate event with custom_tool and a websocket
-          # tool_call event. To prevent duplicate ToolCallStart events on the
-          # client, we suppress the tool calls from this StepUpdate before
-          # putting it in the queue.
-          #
-          # This filtering is done here rather than in from_dict() because
-          # during history resumption, from_dict() is called directly to load
-          # historical steps. Since no websocket tool_call events are replayed
-          # during resumption, from_dict() must parse the custom_tool from the
-          # history payload to reconstruct the steps in the session.
-          step_obj_for_queue = step_obj.model_copy(update={"tool_calls": []})
-
-      await self.step_queue.put(step_obj_for_queue)
-
-      # Record the main trajectory ID on the first step we see
-      if self.main_trajectory_id is None and step_update.trajectory_id:
-        self.main_trajectory_id = step_update.trajectory_id
-
-      # Dispatch Telemetry Internal Step Hooks
-      if (
+      dispatch_pre = (
           not tracker.pre_step_dispatched
-          and self._hook_runner
+          and self._hook_runner is not None
           and step_update.state
           != localharness_pb2.StepUpdate.State.STATE_UNSPECIFIED
-      ):
+      )
+      if dispatch_pre:
         tracker.pre_step_dispatched = True
-        await self._hook_runner.dispatch_pre_step(
-            self._get_turn_context(), step_obj
-        )
 
       is_terminal = step_update.state in (
           localharness_pb2.StepUpdate.State.STATE_DONE,
           localharness_pb2.StepUpdate.State.STATE_ERROR,
       )
-      if is_terminal and not tracker.post_step_dispatched and self._hook_runner:
+      dispatch_post = (
+          is_terminal
+          and not tracker.post_step_dispatched
+          and self._hook_runner is not None
+      )
+      if dispatch_post:
         tracker.post_step_dispatched = True
-        await self._hook_runner.dispatch_post_step(
-            self._get_turn_context(), step_obj
-        )
+
+      await self._emit_step(
+          step_obj, dispatch_pre=dispatch_pre, dispatch_post=dispatch_post
+      )
 
       # Process wait requests if this is a wait state
       if (
@@ -775,13 +973,7 @@ class LocalHarnessEventProcessor:
       ]
 
       if self._hook_runner and questions_list:
-        ctx = self._get_turn_context()
-        _, question_res, _ = await self._hook_runner.dispatch_interaction(
-            turn_context=ctx,
-            interaction_spec=types.AskQuestionInteractionSpec(
-                questions=questions_list
-            ),
-        )
+        question_res = await self._dispatch_question_interaction(questions_list)
         if question_res:
           for orig_idx, r in zip(indices_to_hook, question_res.responses):
             ans = localharness_pb2.UserQuestionAnswer()
@@ -874,7 +1066,6 @@ class LocalHarnessEventProcessor:
       args = _extract_tool_args(tool_call)
       tc = types.ToolCall(id=tool_call.id, name=tool_call.name, args=args)
 
-
       tool_call_step = LocalConnectionStep(
           id=tool_call.id,
           step_index=1,
@@ -887,25 +1078,9 @@ class LocalHarnessEventProcessor:
       )
       await self.step_queue.put(tool_call_step)
 
-      if self._tool_runner:
-        try:
-          results = await self._tool_runner.process_tool_calls([tc])
-          result = results[0]
-        except Exception as e:  # pylint: disable=broad-except
-          result = types.ToolResult(
-              id=tool_call.id,
-              name=tool_call.name,
-              error=str(e),
-              exception=e,
-          )
-
+      result = await self._execute_client_tool(tc)
+      if result is not None:
         await self._send_tool_results([result])
-      else:
-        logging.warning(
-            "Received tool call %s but no tool runner is configured. "
-            "Yielding to user.",
-            tool_call.name,
-        )
     except Exception as e:  # pylint: disable=broad-except
       logging.exception("_handle_tool_call failed; returning error to model")
       await self._send_tool_results([
@@ -915,32 +1090,6 @@ class LocalHarnessEventProcessor:
               error=f"Internal SDK error: {e!r}",
           )
       ])
-
-  def tool_result_to_dict(self, result: types.ToolResult) -> dict[str, Any]:
-    """Converts a ToolResult to a dictionary representation."""
-    if result.error is not None:
-      return {"error": result.error}
-
-    output = result.result
-    if hasattr(output, "model_dump"):
-      output = output.model_dump(mode="json")
-    elif hasattr(output, "dict"):
-      output = output.dict()
-
-    try:
-      output = _ANY_ADAPTER.dump_python(output, mode="json")
-    except Exception:  # pylint: disable=broad-except
-      logging.warning(
-          "Pydantic serialization failed for tool result, falling back to"
-          " string",
-          exc_info=True,
-      )
-      output = str(output)
-
-    if not isinstance(output, dict):
-      return {"result": output}
-
-    return output
 
   async def _send_tool_results(self, results: list[types.ToolResult]) -> None:
     """Sends tool execution results back to the harness."""
@@ -1006,18 +1155,6 @@ class LocalHarnessEventProcessor:
       self, request: localharness_pb2.PolicyDecisionRequest
   ) -> None:
     """Evaluates a dynamic policy rule and sends the decision response."""
-    rule_id = request.rule_id
-    p = self._dynamic_policy_map.get(rule_id)
-
-    if p is None:
-      logging.error("Unknown policy rule_id: %s", rule_id)
-      await self._send_policy_decision_response(
-          request.request_id,
-          outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
-          deny_reason=f"Unknown rule_id: {rule_id}",
-      )
-      return
-
     try:
       args_dict = json.loads(request.tool_args.arguments_json or "{}")
     except json.JSONDecodeError:
@@ -1028,79 +1165,14 @@ class LocalHarnessEventProcessor:
         args=args_dict,
         server_name=request.tool_args.server_name or None,
     )
-
-    try:
-      # Evaluate the `when` predicate if present.
-      if p.when is not None:
-        predicate_matched = await policy_lib._evaluate_predicate(p, tool_call)
-        if not predicate_matched:
-          await self._send_policy_decision_response(
-              request.request_id,
-              outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_NO_MATCH,
-          )
-          return
-
-      # Apply the decision.
-      if p.ask_user is not None:
-        reason = request.reason or p.reason
-        allow = await policy_lib._execute_ask_user(  # pylint: disable=protected-access
-            p, tool_call, reason=reason
-        )
-        deny_msg = (
-            ""
-            if allow
-            else (reason or f"Denied by user ({p.name or p.tool}).")
-        )
-        await self._send_policy_decision_response(
-            request.request_id,
-            outcome=(
-                localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW
-                if allow
-                else localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY
-            ),
-            deny_reason=deny_msg,
-        )
-      elif p.decision == policy_lib.Decision.ASK_USER:
-        deny_msg = (
-            f"Policy '{p.name or p.tool}' requires ask_user handler, but none"
-            " was provided."
-        )
-        logging.error(deny_msg)
-        await self._send_policy_decision_response(
-            request.request_id,
-            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
-            deny_reason=deny_msg,
-        )
-      elif p.decision == policy_lib.Decision.DENY:
-        deny_msg = request.reason or f"Denied by policy '{p.name or p.tool}'."
-        await self._send_policy_decision_response(
-            request.request_id,
-            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
-            deny_reason=deny_msg,
-        )
-      elif p.decision == policy_lib.Decision.APPROVE:
-        await self._send_policy_decision_response(
-            request.request_id,
-            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_ALLOW,
-        )
-      else:
-        deny_msg = (
-            f"Unhandled policy decision '{p.decision}' for"
-            f" '{p.name or p.tool}'."
-        )
-        logging.error(deny_msg)
-        await self._send_policy_decision_response(
-            request.request_id,
-            outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
-            deny_reason=deny_msg,
-        )
-    except Exception as e:  # pylint: disable=broad-except
-      logging.exception("Policy evaluation failed for rule_id=%s", rule_id)
-      await self._send_policy_decision_response(
-          request.request_id,
-          outcome=localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY,
-          deny_reason=f"Policy evaluation error: {e}",
-      )
+    outcome, deny_reason = await self._evaluate_dynamic_policy(
+        request.rule_id, request.reason, tool_call
+    )
+    await self._send_policy_decision_response(
+        request.request_id,
+        outcome=outcome,
+        deny_reason=deny_reason,
+    )
 
   async def _send_policy_decision_response(
       self,
