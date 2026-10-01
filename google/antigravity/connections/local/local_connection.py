@@ -18,7 +18,6 @@ import asyncio
 import collections
 import importlib.metadata
 import importlib.resources
-import inspect
 import json
 import logging
 import os
@@ -32,7 +31,6 @@ import sys
 import threading
 from typing import Any, AsyncIterator, Callable, Sequence, cast
 
-from google.genai import types as genai_types
 from google.protobuf import json_format
 from typing_extensions import override
 import websockets
@@ -41,10 +39,10 @@ from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
+from google.antigravity.connections.local import interactions_config_converter
 from google.antigravity.connections.local import local_connection_config
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import policy
-from google.antigravity.tools import schema_utils
 from google.antigravity.tools import tool_runner as t_runner
 
 LocalConnectionStep = event_processor.LocalConnectionStep
@@ -265,10 +263,10 @@ def callable_to_tool_proto(
 ) -> localharness_pb2.Tool:
   """Converts a Python callable to a localharness Tool proto.
 
-  Uses google.genai.types.FunctionDeclaration for schema extraction.
-  If a ``tool_runner`` is provided, the runner's ``get_public_callable``
-  is used to strip injectable parameters (e.g. ``ToolContext``) from
-  the schema so the model never sees them.
+  Uses interactions_config_converter.callable_to_function_tool_dict for schema
+  extraction and normalization. If a ``tool_runner`` is provided, the runner's
+  ``get_public_callable`` is used to strip injectable parameters (e.g.
+  ``ToolContext``) from the schema so the model never sees them.
 
   Args:
       fn: The Python callable to convert.
@@ -277,53 +275,13 @@ def callable_to_tool_proto(
   Returns:
       A localharness_pb2.Tool proto.
   """
-  if isinstance(fn, t_runner.ToolWithSchema):
-    return localharness_pb2.Tool(
-        name=getattr(fn, "__name__", ""),
-        description=fn.__doc__ or "",
-        parameters_json_schema=json.dumps(
-            schema_utils.normalize_schema(fn.input_schema)
-        ),
-    )
-
-  # Use the ToolRunner's public callable to strip injectable params.
-  target_fn = fn
-  tool_name = getattr(fn, "__name__", None) or type(fn).__name__
-  if tool_runner is not None and tool_name in tool_runner.tools:
-    target_fn = tool_runner.get_public_callable(tool_name)
-
-  if not hasattr(target_fn, "__name__"):
-    orig_fn = target_fn
-
-    def wrapped(*args, **kwargs):
-      return orig_fn(*args, **kwargs)
-
-    wrapped.__name__ = tool_name
-    setattr(wrapped, "__doc__", getattr(orig_fn, "__doc__", None))
-    try:
-      setattr(wrapped, "__signature__", inspect.signature(orig_fn))
-    except (ValueError, TypeError):
-      setattr(
-          wrapped, "__annotations__", getattr(orig_fn, "__annotations__", {})
-      )
-    target_fn = wrapped
-
-  decl = genai_types.FunctionDeclaration.from_callable_with_api_option(
-      callable=target_fn,
-      api_option="GEMINI_API",
+  fn_dict = interactions_config_converter.callable_to_function_tool_dict(
+      fn, tool_runner=tool_runner
   )
-  if decl.parameters:
-    parameters = decl.parameters.model_dump(exclude_none=True)
-  elif decl.parameters_json_schema:
-    parameters = decl.parameters_json_schema
-  else:
-    parameters = {"type": "object", "properties": {}}
   return localharness_pb2.Tool(
-      name=decl.name,
-      description=decl.description or "",
-      parameters_json_schema=json.dumps(
-          schema_utils.normalize_schema(parameters)
-      ),
+      name=fn_dict["name"],
+      description=fn_dict.get("description", ""),
+      parameters_json_schema=json.dumps(fn_dict["parameters"]),
   )
 
 
