@@ -182,6 +182,13 @@ message SystemInstructions {
     .antigravity.localharness.CustomSystemInstructions custom = 1;
     .antigravity.localharness.AppendedSystemInstructions appended = 2;
   }
+  repeated .antigravity.localharness.TemplateOverride overrides = 3;
+}
+message TemplateOverride {
+  string title = 1;
+  string text = 2;
+  bool remove = 3;
+  repeated .antigravity.localharness.SystemInstructionTemplate si_template = 4;
 }
 message CustomSystemInstructions {
   message Part {
