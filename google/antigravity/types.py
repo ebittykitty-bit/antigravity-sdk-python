@@ -1097,7 +1097,14 @@ class UsageMetadata(pydantic.BaseModel):
       return self.__add__(other)
     return NotImplemented
 
-  def __sub__(self, other: UsageMetadata) -> UsageMetadata:
+  def __sub__(self, other: Any) -> UsageMetadata:
+    """Subtracts token counts of another UsageMetadata or returns a copy for 0."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.model_copy()
     if not isinstance(other, UsageMetadata):
       return NotImplemented
     return self.__class__(

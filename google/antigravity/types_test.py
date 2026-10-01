@@ -2311,10 +2311,40 @@ class UsageMetadataTest(unittest.TestCase):
     self.assertEqual((u_pri - u_std).service_tier, types.ServiceTier.PRIORITY)
     self.assertIsNone((u_none - u_none).service_tier)
 
+  def test_sub_operator_zero_identity(self):
+    """Verifies that u - 0 returns an independent copy of u."""
+    u = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    res = u - 0
+    self.assertEqual(res, u)
+    self.assertIsNot(res, u)
+
+    res_float = u - 0.0
+    self.assertEqual(res_float, u)
+    self.assertIsNot(res_float, u)
+
   def test_sub_operator_invalid_type(self):
     """Verifies that __sub__ returns NotImplemented for invalid types."""
     u = types.UsageMetadata(prompt_token_count=10)
     self.assertEqual(u.__sub__(1), NotImplemented)
+    self.assertEqual(u.__sub__("invalid"), NotImplemented)
+    self.assertEqual(u.__sub__(False), NotImplemented)
+    self.assertEqual(u.__sub__(True), NotImplemented)
+
+    with self.assertRaises(TypeError):
+      _ = u - 1
+    with self.assertRaises(TypeError):
+      _ = u - "invalid"
+    with self.assertRaises(TypeError):
+      _ = u - False
+    with self.assertRaises(TypeError):
+      _ = u - True
 
   def test_radd_operator(self):
     """Verifies that __radd__ and 0 identity work as expected."""
