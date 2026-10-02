@@ -143,6 +143,7 @@ message Interaction {
   repeated .genai.Step steps = 51;
   map<string, string> labels = 59;
   repeated .genai.Error errors = 62;
+  bytes continuation_token = 66;
 }
 message InteractionMetadata {
   string id = 1;
