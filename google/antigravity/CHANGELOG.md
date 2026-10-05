@@ -7,6 +7,49 @@ All notable changes to the Google Antigravity Python SDK will be documented in t
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.21] - 2026-10-05
+
+This release introduces experimental API isolation via the `@beta` decorator and `.beta` namespaces, granular skills configuration for subagents, and bulk hook registration during agent initialization. It also expands typing support for tool context annotations, refines `UsageMetadata` arithmetic operations, and resolves a critical issue where tool calls with empty string IDs were unintentionally deduplicated.
+
+### 🌟 Key Highlights
+- **Experimental API Isolation with Beta Namespaces**: Introduces the `@beta` decorator and `google.antigravity.beta` module, enabling access to preview and experimental features on class and instance namespaces without polluting the stable API surface.
+  ```python
+  from google.antigravity import Agent, LocalAgentConfig
+
+  # Access experimental methods via the .beta namespace
+  config = LocalAgentConfig(...)
+  async with Agent(config) as agent:
+      await agent.beta.experimental_feature()
+  ```
+- **Declarative Subagent Skills Configuration**: Adds `skills_config` support to `SubagentConfig`, allowing developers to explicitly configure subagent skill inheritance, override skills, or isolate subagents from parent skills.
+  ```python
+  from google.antigravity import SubagentConfig, SubagentOverrideSkillsConfig
+  config = SubagentConfig(
+      skills_config=SubagentOverrideSkillsConfig(skill_paths=["/path/to/custom_skills"])
+  )
+  ```
+- **Bulk Hook Registration**: Enables registering sequences of hooks at once during `Agent` session initialization and within `HookRunner`.
+  ```python
+  from google.antigravity import LocalAgentConfig
+
+  config = LocalAgentConfig(hooks=[auth_hook, logging_hook, metrics_hook])
+  ```
+
+---
+
+### 📋 Detailed Changes
+
+#### Features & Enhancements
+- **Beta API Decorator & Namespace**: Added `@beta` and `BetaNamespace` support to expose preview classes, methods, and properties under dedicated `.beta` accessors and `google.antigravity.beta`.
+- **Subagent Skills Management**: Added `SubagentSkillsConfig`, `SubagentInheritSkillsConfig`, `SubagentNoneSkillsConfig`, and `SubagentOverrideSkillsConfig` to `SubagentConfig` for declarative control over subagent skills.
+- **Bulk Hook Registration**: Updated `HookRunner` and `Agent` session initialization to accept collections of hooks in addition to individual registrations.
+- **Qualified Typing in Tool Annotations**: Expanded `ToolRunner` string annotation inspection to resolve qualified typing wrappers (`typing.Optional`, `typing.Union`, and `typing.Annotated`) when injecting `ToolContext`.
+- **UsageMetadata Arithmetic**: Harmonized `UsageMetadata.__sub__` typing and zero-value identity behavior to align with `UsageMetadata.__add__`.
+- **Tool Inspection**: Added `__repr__` to `ToolWithSchema` for clearer terminal output and debugging inspection.
+
+#### Bug Fixes
+- **Tool Call Deduplication**: Fixed an issue in `Conversation.receive_chunks()` where tool calls with empty string IDs (`id=''`) were treated as duplicate IDs and dropped; they are now treated as absent IDs and yielded correctly.
+
 ## [0.1.18] - 2026-09-21
 
 This release announces official Antigravity SDK local model support (LiteRT and LocalOpenAI configs are now ready to use), adds a standardized evaluation configuration preset to provide a product-agnostic default for Gemini's coding ability, introduces custom model overrides for subagents, enables schedule and background task management by default, and expands compatibility with Vertex AI service tier handling.
