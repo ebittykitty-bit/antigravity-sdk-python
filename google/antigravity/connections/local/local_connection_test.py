@@ -4921,6 +4921,23 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
     await harness.disconnect_sdk()
     self.assertEqual(call_order, ["ws_close", "stdin_close"])
 
+  async def test_disconnect_raises_on_nonzero_exit_code(self):
+    """Verifies AntigravityExecutionError is raised if harness exits non-zero."""
+    self.mock_process.poll.return_value = 1
+    self.mock_process.returncode = 1
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+    )
+    harness.conn._stderr_lines.append(
+        "XBOX_SANDBOX_FATAL_ERROR: snapshot creation failed"
+    )
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError,
+        r"(?s)Harness process exited with code 1.*XBOX_SANDBOX_FATAL_ERROR",
+    ):
+      await harness.disconnect_sdk()
+
 
 class LocalConnectionUnexpectedCloseTest(unittest.IsolatedAsyncioTestCase):
   """Tests for error surfacing when the harness crashes mid-session."""

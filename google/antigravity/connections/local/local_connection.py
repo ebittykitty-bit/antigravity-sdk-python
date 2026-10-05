@@ -610,6 +610,19 @@ class LocalConnection(connection.Connection):
           except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait(timeout=1)
+
+        if self._stderr_thread:
+          self._stderr_thread.join(timeout=1.0)
+
+        returncode = self._process.poll()
+        if returncode is None:
+          returncode = self._process.returncode
+        if isinstance(returncode, int) and returncode != 0:
+          stderr_tail = "\n".join(self._stderr_lines) or "(no stderr output)"
+          raise types.AntigravityExecutionError(
+              f"Harness process exited with code {returncode}."
+              f"\nHarness stderr:\n{stderr_tail}"
+          )
     finally:
       if hook_error is not None:
         raise hook_error
