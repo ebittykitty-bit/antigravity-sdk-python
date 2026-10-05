@@ -70,11 +70,7 @@ class Agent:
     """
     logging.info("Starting Agent session")
     try:
-      self._hook_runner = hook_runner.HookRunner()
-
-      # Register pending hooks
-      for hook in self._pending_hooks:
-        self._hook_runner.register_hook(hook)
+      self._hook_runner = hook_runner.HookRunner(hooks=self._pending_hooks)
       self._pending_hooks.clear()
 
       # Apply policies

@@ -471,6 +471,24 @@ class HookRunnerTest(unittest.IsolatedAsyncioTestCase):
     self.assertIn(my_hook, runner.on_session_start_hooks)
     self.assertIn(my_hook, runner.on_session_end_hooks)
 
+  async def test_init_with_hooks(self):
+    class StartHook(hooks.OnSessionStartHook):
+
+      async def run(self, context: hooks.HookContext, data: Any) -> None:
+        pass
+
+    class TurnHook(hooks.PostTurnHook):
+
+      async def run(self, context: hooks.HookContext, data: Any) -> None:
+        pass
+
+    start_hook = StartHook()
+    turn_hook = TurnHook()
+    runner = hook_runner.HookRunner(hooks=[start_hook, turn_hook])
+
+    self.assertIn(start_hook, runner.on_session_start_hooks)
+    self.assertIn(turn_hook, runner.post_turn_hooks)
+
   async def test_dispatch_post_turn(self):
     called = False
 
