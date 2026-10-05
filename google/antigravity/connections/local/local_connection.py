@@ -840,6 +840,7 @@ def _to_mcp_server_proto(
         enabled_tools=server_cfg.enabled_tools or [],
         disabled_tools=server_cfg.disabled_tools or [],
         timeout_seconds=server_cfg.timeout_seconds or 0,
+        force_all_tools_eager=server_cfg.force_all_tools_eager,
         stdio=localharness_pb2.McpStdioTransport(
             command=server_cfg.command,
             args=server_cfg.args,
@@ -852,6 +853,7 @@ def _to_mcp_server_proto(
         enabled_tools=server_cfg.enabled_tools or [],
         disabled_tools=server_cfg.disabled_tools or [],
         timeout_seconds=server_cfg.timeout_seconds or 0,
+        force_all_tools_eager=server_cfg.force_all_tools_eager,
         http=localharness_pb2.McpHttpTransport(
             url=server_cfg.url,
             headers=server_cfg.headers or {},

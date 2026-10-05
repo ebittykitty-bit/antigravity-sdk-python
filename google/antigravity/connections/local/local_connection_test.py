@@ -5651,6 +5651,7 @@ class LocalAgentConfigTest(absltest.TestCase):
         args=["math"],
         env={"FOO": "bar"},
         enabled_tools=["add", "sub"],
+        force_all_tools_eager=True,
     )
     sse_cfg = types.McpStreamableHttpServer(
         name="my-sse",
@@ -5681,12 +5682,14 @@ class LocalAgentConfigTest(absltest.TestCase):
     stdio_pb = harness_pb.mcp_servers[0]
     self.assertEqual(stdio_pb.name, "my-stdio")
     self.assertEqual(stdio_pb.enabled_tools, ["add", "sub"])
+    self.assertTrue(stdio_pb.force_all_tools_eager)
     self.assertEqual(stdio_pb.stdio.command, "npx")
     self.assertEqual(stdio_pb.stdio.args, ["math"])
     self.assertEqual(dict(stdio_pb.stdio.env), {"FOO": "bar"})
 
     sse_pb = harness_pb.mcp_servers[1]
     self.assertEqual(sse_pb.name, "my-sse")
+    self.assertFalse(sse_pb.force_all_tools_eager)
     self.assertEqual(sse_pb.http.url, "https://sse.example.com")
 
 

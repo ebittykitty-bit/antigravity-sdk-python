@@ -887,12 +887,15 @@ class BaseMcpServerConfig(pydantic.BaseModel):
       with enabled_tools. When None, all tools from the server are enabled.
       Disabled tools are removed from the model's context entirely, saving
       tokens and preventing the model from even considering them.
+    force_all_tools_eager: When True, forces all tools from this server to be
+      loaded eagerly into the model's prompt rather than lazily via tool search.
   """
 
   name: Annotated[str, pydantic.Field(pattern=r"^[a-zA-Z0-9_-]+$")]
   timeout_seconds: int | None = None
   enabled_tools: list[str] | None = None
   disabled_tools: list[str] | None = None
+  force_all_tools_eager: bool = False
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "BaseMcpServerConfig":

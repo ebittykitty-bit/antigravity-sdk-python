@@ -646,6 +646,7 @@ message McpServerConfig {
   .antigravity.localharness.McpServerConfig.AuthProviderType
       auth_provider_type = 6;
   int32 timeout_seconds = 7;
+  bool force_all_tools_eager = 10;
 }
 message McpStdioTransport {
   string command = 1;

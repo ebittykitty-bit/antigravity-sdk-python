@@ -1972,6 +1972,28 @@ class McpServerConfigTest(parameterized.TestCase):
           "disabled_tools",
           ["tool2"],
       ),
+      (
+          "stdio_force_eager",
+          types.McpStdioServer,
+          {
+              "name": "stdio_server",
+              "command": "node",
+              "force_all_tools_eager": True,
+          },
+          "force_all_tools_eager",
+          True,
+      ),
+      (
+          "http_force_eager",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
+              "force_all_tools_eager": True,
+          },
+          "force_all_tools_eager",
+          True,
+      ),
   )
   def test_server_construction_with_filtering(
       self, server_cls, init_kwargs, expected_attr, expected_val
