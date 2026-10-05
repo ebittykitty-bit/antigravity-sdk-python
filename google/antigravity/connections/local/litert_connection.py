@@ -125,14 +125,14 @@ class LiteRTConnectionStrategy(
             if hasattr(litert_lm, "LogSeverity")
             else 0
         )
-        litert_lm.set_min_log_severity(int(verbose_level))  # pytype: disable=bad-argument-type # Safe cast for dynamic LogSeverity enum value
+        litert_lm.set_min_log_severity(int(verbose_level))  # Safe cast for dynamic LogSeverity enum value  # pyrefly: ignore[bad-argument-type]
       else:
         silent_level = (
             getattr(litert_lm.LogSeverity, "SILENT", 1000)
             if hasattr(litert_lm, "LogSeverity")
             else 1000
         )
-        litert_lm.set_min_log_severity(int(silent_level))  # pytype: disable=bad-argument-type # Safe cast for dynamic LogSeverity enum value
+        litert_lm.set_min_log_severity(int(silent_level))  # Safe cast for dynamic LogSeverity enum value  # pyrefly: ignore[bad-argument-type]
     except Exception as e:  # pylint: disable=broad-exception-caught
       logging.debug("Failed to configure LiteRT min log severity: %s", e)
 
