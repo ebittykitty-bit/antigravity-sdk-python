@@ -2368,6 +2368,58 @@ class UsageMetadataTest(unittest.TestCase):
     with self.assertRaises(TypeError):
       _ = u - True
 
+  def test_rsub_operator(self):
+    """Verifies that __rsub__ and numeric 0 identity work as expected."""
+    u = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    # 0 - u negates all token counts
+    neg = 0 - u
+    self.assertEqual(neg.prompt_token_count, -100)
+    self.assertEqual(neg.cached_content_token_count, -50)
+    self.assertEqual(neg.candidates_token_count, -30)
+    self.assertEqual(neg.thoughts_token_count, -20)
+    self.assertEqual(neg.total_token_count, -150)
+    self.assertEqual(neg.service_tier, types.ServiceTier.PRIORITY)
+
+    # 0.0 - u behaves identically
+    neg_float = 0.0 - u
+    self.assertEqual(neg_float.prompt_token_count, -100)
+    self.assertEqual(neg_float.total_token_count, -150)
+
+    # Direct __rsub__ between UsageMetadata instances delegating to
+    # other.__sub__(self).
+    u_other = types.UsageMetadata(
+        prompt_token_count=300,
+        cached_content_token_count=60,
+        candidates_token_count=70,
+        thoughts_token_count=25,
+        total_token_count=395,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    self.assertEqual(u.__rsub__(u_other), u_other - u)
+
+    # Invalid types: direct dunder returns NotImplemented
+    self.assertEqual(u.__rsub__("invalid"), NotImplemented)
+    self.assertEqual(u.__rsub__(1), NotImplemented)
+    self.assertEqual(u.__rsub__(False), NotImplemented)
+    self.assertEqual(u.__rsub__(True), NotImplemented)
+
+    # Operator expressions raise TypeError
+    with self.assertRaises(TypeError):
+      _ = 1 - u
+    with self.assertRaises(TypeError):
+      _ = "invalid" - u
+    with self.assertRaises(TypeError):
+      _ = False - u
+    with self.assertRaises(TypeError):
+      _ = True - u
+
   def test_radd_operator(self):
     """Verifies that __radd__ and 0 identity work as expected."""
     u1 = types.UsageMetadata(

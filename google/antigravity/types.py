@@ -1124,6 +1124,25 @@ class UsageMetadata(pydantic.BaseModel):
         service_tier=self.service_tier or other.service_tier,
     )
 
+  def __rsub__(self, other: Any) -> UsageMetadata:
+    """Supports reflected subtraction for numeric 0 identity (0 - u)."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.__class__(
+          prompt_token_count=-(self.prompt_token_count or 0),
+          cached_content_token_count=-(self.cached_content_token_count or 0),
+          candidates_token_count=-(self.candidates_token_count or 0),
+          thoughts_token_count=-(self.thoughts_token_count or 0),
+          total_token_count=-(self.total_token_count or 0),
+          service_tier=self.service_tier,
+      )
+    if isinstance(other, UsageMetadata):
+      return other.__sub__(self)
+    return NotImplemented
+
   def __mul__(self, factor: Any) -> UsageMetadata:
     """Scales token counts by a non-negative, finite numeric factor."""
     if isinstance(factor, bool) or not isinstance(factor, (int, float)):
