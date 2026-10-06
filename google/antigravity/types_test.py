@@ -2985,5 +2985,45 @@ class SubagentSkillsConfigTest(unittest.TestCase):
       })
 
 
+class InlineSkillTest(absltest.TestCase):
+  """Tests for InlineSkill."""
+
+  def test_defaults(self):
+    skill = types.InlineSkill(
+        name="code-formatter",
+        description="Formats source files.",
+        content="# Formatting Rules",
+    )
+    self.assertEqual(skill.name, "code-formatter")
+    self.assertEqual(skill.description, "Formats source files.")
+    self.assertEqual(skill.content, "# Formatting Rules")
+    self.assertEqual(skill.allowed_tools, [])
+    self.assertEqual(skill.dependent_tools, [])
+    self.assertEqual(skill.dependent_skills, [])
+    self.assertEqual(skill.metadata, {})
+
+  def test_custom_fields(self):
+    skill = types.InlineSkill(
+        name="binary-triage",
+        description="Analyzes ELF binaries.",
+        content="# Binary Triage",
+        allowed_tools=["view_file"],
+        dependent_tools=["ghidra_decompile"],
+        dependent_skills=["elf-headers"],
+        metadata={"visibility": "hidden"},
+    )
+    self.assertEqual(skill.allowed_tools, ["view_file"])
+    self.assertEqual(skill.dependent_tools, ["ghidra_decompile"])
+    self.assertEqual(skill.dependent_skills, ["elf-headers"])
+    self.assertEqual(skill.metadata, {"visibility": "hidden"})
+
+  def test_missing_required_fields_raises(self):
+    with self.assertRaises(pydantic.ValidationError):
+      types.InlineSkill(  # pytype: disable=missing-parameter
+          name="incomplete",
+          description="missing content",
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

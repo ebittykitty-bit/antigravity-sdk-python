@@ -77,7 +77,6 @@ def derive_litert_compaction_config(
   )
 
 
-
 class LiteRTBackend(str, enum.Enum):
   CPU = "cpu"
   GPU = "gpu"
@@ -148,6 +147,7 @@ class LiteRTAgentConfig(BaseLocalAgentConfig):
           dict[str, Any] | type[pydantic.BaseModel] | str | None
       ) = None,
       skills_paths: list[str] | None = None,
+      inline_skills: list[types.InlineSkill] | None = None,
       compaction_config: types.CompactionConfig | None = None,
       **kwargs: Any,
   ):
@@ -206,6 +206,7 @@ class LiteRTAgentConfig(BaseLocalAgentConfig):
         workspaces=self.workspaces,
         app_data_dir=self.app_data_dir,
         skills_paths=self.skills_paths,
+        inline_skills=self.inline_skills,
         mcp_servers=self.mcp_servers,
         subagents=self.subagents,
         env=self.env,

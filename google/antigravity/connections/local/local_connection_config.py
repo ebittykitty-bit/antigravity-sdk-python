@@ -182,6 +182,16 @@ class BaseLocalAgentConfig(connection.AgentConfig):
           )
     return self
 
+  @pydantic.model_validator(mode="after")
+  def _validate_skills_sources(self) -> "BaseLocalAgentConfig":
+    if self.skills_paths and self.inline_skills:
+      raise ValueError(
+          "combining inline_skills and skills_paths is not supported by"
+          " LocalHarness; provide either inline_skills or skills_paths, not"
+          " both."
+      )
+    return self
+
   def _get_system_instructions(self) -> types.SystemInstructions | None:
     """Returns the system instructions, normalizing shorthand if needed."""
     if isinstance(self.system_instructions, str):
@@ -244,6 +254,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
           dict[str, Any] | type[pydantic.BaseModel] | str | None
       ) = None,
       skills_paths: list[str] | None = None,
+      inline_skills: list[types.InlineSkill] | None = None,
       retry_config: types.RetryConfig | None = None,
       budget_config: types.BudgetConfig | None = None,
       compaction_config: types.CompactionConfig | None = None,
@@ -376,6 +387,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
         workspaces=self.workspaces,
         app_data_dir=self.app_data_dir,
         skills_paths=self.skills_paths,
+        inline_skills=self.inline_skills,
         mcp_servers=self.mcp_servers,
         env=self.env,
         subagents=self.subagents,

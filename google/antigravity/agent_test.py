@@ -843,6 +843,34 @@ class AgentTest(unittest.IsolatedAsyncioTestCase):
       "local.local_connection.LocalConnectionStrategy"
   )
   @mock.patch.object(conversation.Conversation, "create")
+  async def test_agent_with_inline_skills(
+      self, mock_conv_create, mock_strategy_class
+  ):
+    del mock_conv_create  # Unused.
+
+    mock_strategy_instance = mock.MagicMock()
+    mock_strategy_instance.stop = mock.AsyncMock()
+    mock_strategy_class.return_value = mock_strategy_instance
+
+    inline_skills = [
+        types.InlineSkill(
+            name="my-skill",
+            description="A test skill.",
+            content="# Instructions",
+        )
+    ]
+    config = local_connection.LocalAgentConfig(
+        system_instructions="test", inline_skills=inline_skills
+    )
+    async with agent.Agent(config) as _:
+      _, kwargs = mock_strategy_class.call_args
+      self.assertEqual(kwargs.get("inline_skills"), inline_skills)
+
+  @mock.patch(
+      "google.antigravity.connections."
+      "local.local_connection.LocalConnectionStrategy"
+  )
+  @mock.patch.object(conversation.Conversation, "create")
   async def test_agent_conversation_after_start(
       self, mock_conv_create, mock_strategy_class
   ):

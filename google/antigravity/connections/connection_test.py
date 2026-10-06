@@ -101,6 +101,11 @@ class AgentConfigTest(unittest.TestCase):
 
     config = ConcreteConfig(system_instructions="test")
     self.assertEqual(config.system_instructions, "test")
+    self.assertEqual(config.inline_skills, [])
+
+    skill = types.InlineSkill(name="s1", description="d", content="c")
+    config_with_skills = ConcreteConfig(inline_skills=[skill])
+    self.assertEqual(config_with_skills.inline_skills, [skill])
 
   def test_response_schema_valid_json_string(self):
     class ConcreteConfig(connection.AgentConfig):

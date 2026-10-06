@@ -35,6 +35,7 @@ from google.antigravity.types import from_file
 from google.antigravity.types import GeminiAPIEndpoint
 from google.antigravity.types import GeminiModelOptions
 from google.antigravity.types import Image
+from google.antigravity.types import InlineSkill
 from google.antigravity.types import ModelAPIRetryConfig
 from google.antigravity.types import ModelEndpoint
 from google.antigravity.types import ModelOutputRetryConfig
@@ -72,6 +73,7 @@ __all__ = [
     "GeminiAPIEndpoint",
     "GeminiModelOptions",
     "Image",
+    "InlineSkill",
     "ModelAPIRetryConfig",
     "ModelEndpoint",
     "ModelOutputRetryConfig",

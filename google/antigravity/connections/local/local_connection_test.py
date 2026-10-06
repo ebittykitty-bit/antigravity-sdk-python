@@ -2294,6 +2294,91 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(skills_paths=["/skills/a", "/skills/b"])
     config = strategy._build_harness_config()
     self.assertEqual(list(config.skills_paths), ["/skills/a", "/skills/b"])
+    self.assertFalse(config.HasField("skills_config"))
+
+  def test_inline_skills_to_proto(self):
+    """Verifies inline_skills translate into HarnessConfig.skills_config."""
+    inline_skills = [
+        types.InlineSkill(
+            name="skill-one",
+            description="First inline skill.",
+            content="# Skill One",
+            allowed_tools=["view_file"],
+            dependent_tools=["custom_tool_a", "custom_tool_b"],
+            dependent_skills=["skill-two"],
+            metadata={"visibility": "hidden"},
+        ),
+        types.InlineSkill(
+            name="skill-two",
+            description="Second inline skill.",
+            content="# Skill Two",
+            dependent_tools=["ignored_tool"],
+            metadata={"dependent_tools": "explicit_tool"},
+        ),
+    ]
+    strategy = self._make_strategy(inline_skills=inline_skills)
+    config = strategy._build_harness_config()
+    self.assertTrue(config.HasField("skills_config"))
+    self.assertTrue(config.skills_config.enabled)
+    self.assertLen(config.skills_config.skills, 2)
+
+    first = config.skills_config.skills[0]
+    self.assertEqual(first.WhichOneof("source"), "skill")
+    self.assertEqual(first.skill.name, "skill-one")
+    self.assertEqual(first.skill.description, "First inline skill.")
+    self.assertEqual(first.skill.content, "# Skill One")
+    self.assertEqual(list(first.skill.allowed_tools), ["view_file"])
+    self.assertEqual(
+        dict(first.skill.metadata),
+        {
+            "visibility": "hidden",
+            "dependent_tools": '["custom_tool_a", "custom_tool_b"]',
+            "dependent_skills": '["skill-two"]',
+        },
+    )
+
+    second = config.skills_config.skills[1]
+    self.assertEqual(second.skill.name, "skill-two")
+    self.assertEqual(
+        dict(second.skill.metadata),
+        {"dependent_tools": "explicit_tool"},
+    )
+
+  def test_combining_inline_skills_and_skills_paths_raises(self):
+    """Verifies combining inline_skills and skills_paths raises ValueError."""
+    skill = types.InlineSkill(name="s1", description="desc", content="# body")
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      local_connection_config.LocalAgentConfig(
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      litert_connection_config.LiteRTAgentConfig(
+          model_path="/tmp/model.litertlm",
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      local_openai_connection_config.LocalOpenAIAgentConfig(
+          model="llama3",
+          base_url="http://localhost:11434/v1",
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    strategy = self._make_strategy(
+        skills_paths=["/skills/a"],
+        inline_skills=[skill],
+    )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      strategy._build_harness_config()
 
   def test_capabilities_config_disabled_tools(self):
     """Verifies that disabling tools produces the correct proto.
@@ -6804,6 +6889,9 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
 
     custom_policies = [policy.deny("run_command"), policy.deny("create_file")]
     budget = types.BudgetConfig()
+    inline_skills = [
+        types.InlineSkill(name="s1", description="d", content="c")
+    ]
 
     class _FakeLiteRTStrategy(local_connection.LocalConnectionStrategy):
 
@@ -6838,6 +6926,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6847,6 +6936,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6855,6 +6945,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6868,6 +6959,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
           self.assertEqual(strategy._policies, custom_policies)
           self.assertEqual(strategy._tools, [sample_tool])
           self.assertEqual(strategy._budget_config, budget)
+          self.assertEqual(strategy._inline_skills, inline_skills)
           self.assertEqual(
               strategy._session_continuation_mode,
               types.SessionContinuationMode.RESUME,

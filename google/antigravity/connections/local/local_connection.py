@@ -920,6 +920,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       hook_runner: h_runner.HookRunner | None = None,
       models: list[types.ModelTarget] | None = None,
       skills_paths: list[str] | None = None,
+      inline_skills: Sequence[types.InlineSkill] | None = None,
       system_instructions: str | types.SystemInstructions | None = None,
       capabilities_config: types.CapabilitiesConfig | None = None,
       compaction_config: types.CompactionConfig | None = None,
@@ -944,6 +945,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       hook_runner: Optional HookRunner for custom hooks.
       models: Optional list of model targets.
       skills_paths: Optional list of paths to search for skills.
+      inline_skills: Optional sequence of in-memory skill definitions.
       system_instructions: Optional SystemInstructions or string shorthand.
       capabilities_config: Optional CapabilitiesConfig to configure tools.
       compaction_config: Optional CompactionConfig to configure compaction.
@@ -969,6 +971,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._mcp_servers = mcp_servers or []
     self._models: list[types.ModelTarget] = models or []
     self._skills_paths = skills_paths
+    self._inline_skills = list(inline_skills) if inline_skills else []
     self._env = env
     self._debug_config = debug_config
     self._retry_config = retry_config
@@ -1293,6 +1296,13 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         self._compaction_config, self._capabilities_config
     )
 
+    if self._inline_skills and self._skills_paths:
+      raise ValueError(
+          "combining inline_skills and skills_paths is not supported by"
+          " LocalHarness; provide either inline_skills or skills_paths, not"
+          " both."
+      )
+
     custom_agents_protos = self._build_custom_subagents_protos(all_tool_protos)
     harness_config = localharness_pb2.HarnessConfig(
         tools=root_tool_protos,
@@ -1318,6 +1328,25 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             self._capabilities_config.agent_behavior
         ),
     )
+    if self._inline_skills:
+      harness_config.skills_config.enabled = True
+      for s in self._inline_skills:
+        entry = harness_config.skills_config.skills.add()
+        entry.skill.name = s.name
+        entry.skill.description = s.description
+        entry.skill.content = s.content
+        if s.allowed_tools:
+          entry.skill.allowed_tools.extend(s.allowed_tools)
+        # genai.skills.Skill carries dependencies in its metadata map, which
+        # InMemoryProvider.GetDependencies parses via ParseListMetadata.
+        metadata = dict(s.metadata)
+        if s.dependent_tools and "dependent_tools" not in metadata:
+          metadata["dependent_tools"] = json.dumps(list(s.dependent_tools))
+        if s.dependent_skills and "dependent_skills" not in metadata:
+          metadata["dependent_skills"] = json.dumps(list(s.dependent_skills))
+        if metadata:
+          entry.skill.metadata.update(metadata)
+
     if self._retry_config:
       retry_proto = build_retry_config_proto(self._retry_config)
       if retry_proto:
