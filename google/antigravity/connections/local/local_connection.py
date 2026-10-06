@@ -1034,6 +1034,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
   ) -> localharness_pb2.HarnessSideTools:
     active_tools = self._resolve_active_tools(cfg, is_subagent=is_subagent)
     subagent_enabled = False
+    run_workflow_enabled = False
     max_depth = None
     allowed_subagents = []
 
@@ -1041,10 +1042,14 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       subagent_enabled = cfg.enable_subagents and (
           types.BuiltinTools.START_SUBAGENT in active_tools
       )
+      run_workflow_enabled = cfg.enable_subagents and (
+          types.BuiltinTools.RUN_WORKFLOW in active_tools
+      )
       max_depth = cfg.max_subagent_depth
       allowed_subagents = cfg.allowed_subagents or []
     elif isinstance(cfg, types.SubagentCapabilities):
       subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+      run_workflow_enabled = types.BuiltinTools.RUN_WORKFLOW in active_tools
       allowed_subagents = cfg.allowed_subagents or []
 
     subagents_proto = localharness_pb2.SubagentsConfig(
@@ -1071,6 +1076,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     return localharness_pb2.HarnessSideTools(
         subagents=subagents_proto,
+        run_workflow=localharness_pb2.RunWorkflowToolConfig(
+            enabled=run_workflow_enabled
+        ),
         find=localharness_pb2.FindToolConfig(
             enabled=types.BuiltinTools.FIND_FILE in active_tools
         ),

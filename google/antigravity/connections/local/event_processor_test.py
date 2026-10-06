@@ -304,6 +304,34 @@ class LocalConnectionStepFromDictTest(absltest.TestCase):
     )
     self.assertEqual(step.tool_calls[0].canonical_path, "/tmp/sunset_123.png")
 
+  def test_step_type_tool_call_with_run_workflow(self):
+    """Verifies that a step with run_workflow populates workflow_progress and ToolCall."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "source": "SOURCE_MODEL",
+        "state": "STATE_DONE",
+        "run_workflow": {
+            "script_path": "file:///tmp/ws/pipeline.py",
+            "description": "Audit modules",
+            "output": "All clean",
+        },
+    })
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+    self.assertLen(step.tool_calls, 1)
+    self.assertEqual(step.tool_calls[0].name, "run_workflow")
+    self.assertEqual(
+        step.tool_calls[0].args,
+        {
+            "script_path": "/tmp/ws/pipeline.py",
+            "description": "Audit modules",
+        },
+    )
+    self.assertEqual(step.tool_calls[0].canonical_path, "/tmp/ws/pipeline.py")
+    self.assertIsNotNone(step.workflow_progress)
+    assert step.workflow_progress is not None
+    self.assertEqual(step.workflow_progress.script_path, "/tmp/ws/pipeline.py")
+    self.assertEqual(step.workflow_progress.description, "Audit modules")
+    self.assertEqual(step.workflow_progress.output, "All clean")
+
   def test_generate_image_result_model_output_path(self):
     """Verifies GenerateImageResult field and string output formatting."""
     res = local_types.GenerateImageResult(
@@ -1157,6 +1185,34 @@ class PolicyDecisionTest(unittest.IsolatedAsyncioTestCase):
         resp.outcome, localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY
     )
     self.assertIn("requires ask_user handler", resp.deny_reason)
+
+  def test_run_workflow_step_from_proto_message_to_dict(self):
+    """Round-trips a StepUpdate with ActionRunWorkflow through json_format.MessageToDict."""
+    su = localharness_pb2.StepUpdate(
+        cascade_id="c-1",
+        trajectory_id="c-1",
+        step_index=3,
+        state=localharness_pb2.StepUpdate.STATE_DONE,
+        source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+        target=localharness_pb2.StepUpdate.TARGET_ENVIRONMENT,
+        run_workflow=localharness_pb2.ActionRunWorkflow(
+            script_path="/workspace/wf.py",
+            description="Audit repo",
+            output="Audit completed.",
+        ),
+    )
+    step_dict = event_processor.json_format.MessageToDict(
+        su, preserving_proto_field_name=True
+    )
+    step = event_processor.LocalConnectionStep.from_dict(step_dict)
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+    self.assertEqual(len(step.tool_calls), 1)
+    self.assertEqual(step.tool_calls[0].name, "run_workflow")
+    self.assertIsNotNone(step.workflow_progress)
+    assert step.workflow_progress is not None
+    self.assertEqual(step.workflow_progress.script_path, "/workspace/wf.py")
+    self.assertEqual(step.workflow_progress.description, "Audit repo")
+    self.assertEqual(step.workflow_progress.output, "Audit completed.")
 
 
 class BaseLocalEventProcessorTest(unittest.IsolatedAsyncioTestCase):

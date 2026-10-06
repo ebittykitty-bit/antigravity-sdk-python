@@ -32,6 +32,7 @@ import warnings
 
 import pydantic
 
+from google.antigravity import beta as _beta_lib
 from google.antigravity.models import GeminiAPIEndpoint
 from google.antigravity.models import GeminiModelOptions
 from google.antigravity.models import ModelEndpoint
@@ -268,9 +269,11 @@ class SubagentCapabilities(pydantic.BaseModel):
     subagent_disabled = (
         self.disabled_tools is not None
         and BuiltinTools.START_SUBAGENT in self.disabled_tools
+        and BuiltinTools.RUN_WORKFLOW in self.disabled_tools
     ) or (
         self.enabled_tools is not None
         and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+        and BuiltinTools.RUN_WORKFLOW not in self.enabled_tools
     )
     if subagent_disabled and self.allowed_subagents is not None:
       raise ValueError(
@@ -490,6 +493,7 @@ class BuiltinTools(str, enum.Enum):
     RUN_COMMAND: Execute a shell command.
     ASK_QUESTION: Ask the user a clarifying question.
     START_SUBAGENT: Invoke a subagent.
+    RUN_WORKFLOW: Execute a multi-agent workflow script.
     GENERATE_IMAGE: Generate or edit images.
     SEARCH_WEB: Search the web.
     READ_URL_CONTENT: Read content from a URL.
@@ -506,6 +510,7 @@ class BuiltinTools(str, enum.Enum):
   RUN_COMMAND = "run_command"
   ASK_QUESTION = "ask_question"
   START_SUBAGENT = "start_subagent"
+  RUN_WORKFLOW = "run_workflow"
   GENERATE_IMAGE = "generate_image"
   SEARCH_WEB = "search_web"
   READ_URL_CONTENT = "read_url_content"
@@ -543,6 +548,7 @@ class BuiltinTools(str, enum.Enum):
         cls.EDIT_FILE,
         cls.ASK_QUESTION,
         cls.START_SUBAGENT,
+        cls.RUN_WORKFLOW,
         cls.GENERATE_IMAGE,
         cls.SEARCH_WEB,
         cls.READ_URL_CONTENT,
@@ -739,10 +745,12 @@ class CapabilitiesConfig(pydantic.BaseModel):
         or (
             self.disabled_tools is not None
             and BuiltinTools.START_SUBAGENT in self.disabled_tools
+            and BuiltinTools.RUN_WORKFLOW in self.disabled_tools
         )
         or (
             self.enabled_tools is not None
             and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+            and BuiltinTools.RUN_WORKFLOW not in self.enabled_tools
         )
     )
     if subagent_disabled:
@@ -1319,6 +1327,27 @@ class StopReason(str, enum.Enum):
   QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
 
 
+@_beta_lib.beta
+class WorkflowProgress(pydantic.BaseModel):
+  """Progress and output metadata for a `run_workflow` step.
+
+  Attributes:
+    script_path: Path to the Python workflow script being executed (populated
+      when `run_workflow` is invoked with a `.py` script file path, including
+      via `await agent.beta.run_workflow(...)`).
+    script: Inline Python workflow script source (populated when the model
+      invokes `run_workflow` with inline script source during `agent.chat()`).
+    description: Brief description of the workflow run.
+    output: Formatted workflow log and result text produced by the workflow
+      script.
+  """
+
+  script_path: str = ""
+  script: str = ""
+  description: str = ""
+  output: str = ""
+
+
 class Step(pydantic.BaseModel):
   """Structure representing one action in the agent trajectory.
 
@@ -1344,6 +1373,8 @@ class Step(pydantic.BaseModel):
       steps per turn may have this flag set; consumers that want only the last
       response should iterate fully.
     structured_output: The structured output extracted from the finish step.
+    workflow_progress: Workflow script metadata and formatted output when this
+      step is a `run_workflow` tool call.
     usage_metadata: (Deprecated) Token usage for this specific step's model
       invocation. Deprecated in favor of ChatResponse.usage_metadata (turn-level
       usage) and agent.conversation.total_usage (session cumulative usage).
@@ -1366,6 +1397,7 @@ class Step(pydantic.BaseModel):
   error: str = ""
   is_complete_response: bool | None = None
   structured_output: Any | None = None
+  workflow_progress: WorkflowProgress | None = None
   usage_metadata: UsageMetadata | None = pydantic.Field(
       default=None,
       deprecated=(
@@ -1777,6 +1809,98 @@ class ChatResponse:
     """
     if not self._is_done:
       await self._conversation.cancel()
+
+
+async def _empty_chunk_stream() -> (
+    AsyncIterator[StreamChunk | ToolCall | ToolResult]
+):
+  if False:  # pylint: disable=using-constant-test
+    yield
+
+
+@_beta_lib.beta
+class WorkflowResult(ChatResponse):
+  """Final result returned by `await agent.beta.run_workflow(...)`.
+
+  Subclasses `ChatResponse` so all turn-level response accessors
+  (`await result.text()`, `await result.structured_output()`,
+  `await result.resolve()`, `result.chunks`, `result.thoughts`,
+  `result.tool_calls`, `result.usage_metadata`, `result.stop_reason`)
+  are available alongside workflow-specific attributes.
+
+  Attributes:
+    script_path: Path to the Python workflow script executed (when invoked with
+      a script file path).
+    script: Inline Python workflow script source (when invoked with inline
+      script source).
+    description: Brief description of the workflow run.
+    output: Formatted workflow log and result text produced by the workflow
+      script.
+    response_text: Final assistant response text from the workflow turn.
+  """
+
+  script_path: str
+  script: str
+  description: str
+  output: str
+  response_text: str
+
+  def __init__(
+      self,
+      chunk_stream: (
+          AsyncIterator[StreamChunk | ToolCall | ToolResult] | None
+      ) = None,
+      conversation: Any = None,
+      *,
+      script_path: str = "",
+      script: str = "",
+      description: str = "",
+      output: str = "",
+      response_text: str = "",
+  ):
+    super().__init__(
+        chunk_stream=(
+            chunk_stream if chunk_stream is not None else _empty_chunk_stream()
+        ),
+        conversation=conversation,
+    )
+    self.script_path = script_path
+    self.script = script
+    self.description = description
+    self.output = output
+    self.response_text = response_text
+    if chunk_stream is None:
+      self._buffered_chunks = (
+          [Text(step_index=0, text=response_text)] if response_text else []
+      )
+      self._is_done = True
+
+  @classmethod
+  def _from_chat_response(
+      cls,
+      chat_resp: ChatResponse,
+      *,
+      script_path: str = "",
+      script: str = "",
+      description: str = "",
+      output: str = "",
+      response_text: str = "",
+  ) -> "WorkflowResult":
+    """Constructs a `WorkflowResult` preserving `chat_resp` state."""
+    res = cls(
+        chunk_stream=getattr(chat_resp, "_chunk_stream", None),
+        conversation=getattr(chat_resp, "_conversation", None),
+        script_path=script_path,
+        script=script,
+        description=description,
+        output=output,
+        response_text=response_text,
+    )
+    if hasattr(chat_resp, "_buffered_chunks"):
+      res._buffered_chunks = list(chat_resp._buffered_chunks)  # pylint: disable=protected-access
+      res._is_done = getattr(chat_resp, "_is_done", True)  # pylint: disable=protected-access
+      res._stream_error = getattr(chat_resp, "_stream_error", None)  # pylint: disable=protected-access
+    return res
 
 
 # =============================================================================

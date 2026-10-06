@@ -620,6 +620,7 @@ class BuiltinToolsTest(parameterized.TestCase):
           "read_url_content",
       ),
       ("start_subagent", types.BuiltinTools.START_SUBAGENT, "start_subagent"),
+      ("run_workflow", types.BuiltinTools.RUN_WORKFLOW, "run_workflow"),
       ("generate_image", types.BuiltinTools.GENERATE_IMAGE, "generate_image"),
       ("schedule", types.BuiltinTools.SCHEDULE, "schedule"),
       ("finish", types.BuiltinTools.FINISH, "finish"),
@@ -654,6 +655,7 @@ class BuiltinToolsTest(parameterized.TestCase):
         types.BuiltinTools.RUN_COMMAND,
         types.BuiltinTools.ASK_QUESTION,
         types.BuiltinTools.START_SUBAGENT,
+        types.BuiltinTools.RUN_WORKFLOW,
         types.BuiltinTools.GENERATE_IMAGE,
         types.BuiltinTools.SEARCH_WEB,
     }
@@ -946,19 +948,25 @@ class CapabilitiesConfigTest(unittest.TestCase):
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
 
   def test_max_subagent_depth_fails_when_start_subagent_tool_disabled(self):
-    """Verifies ValidationError when START_SUBAGENT is in disabled_tools."""
+    """Verifies ValidationError when START_SUBAGENT and RUN_WORKFLOW are in disabled_tools."""
     with self.assertRaises(pydantic.ValidationError) as cm:
       types.CapabilitiesConfig(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           max_subagent_depth=3,
       )
     self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
 
   def test_allowed_subagents_fails_when_start_subagent_tool_disabled(self):
-    """Verifies ValidationError when START_SUBAGENT is in disabled_tools and allowed_subagents is set."""
+    """Verifies ValidationError when START_SUBAGENT and RUN_WORKFLOW are in disabled_tools and allowed_subagents is set."""
     with self.assertRaises(pydantic.ValidationError) as cm:
       types.CapabilitiesConfig(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           allowed_subagents=["worker"],
       )
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
@@ -984,6 +992,38 @@ class CapabilitiesConfigTest(unittest.TestCase):
           allowed_subagents=["worker"],
       )
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
+
+  def test_run_workflow_in_enabled_tools_permits_subagent_options(self):
+    """Verifies RUN_WORKFLOW in enabled_tools permits allowed_subagents and max_subagent_depth."""
+    cfg = types.CapabilitiesConfig(
+        enabled_tools=[types.BuiltinTools.RUN_WORKFLOW],
+        max_subagent_depth=2,
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(cfg.max_subagent_depth, 2)
+    self.assertEqual(cfg.allowed_subagents, ["worker"])
+    sub_caps = types.SubagentCapabilities(
+        enabled_tools=[types.BuiltinTools.RUN_WORKFLOW],
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(sub_caps.allowed_subagents, ["worker"])
+
+  def test_disabling_only_start_subagent_permits_subagent_options_for_run_workflow(
+      self,
+  ):
+    """Verifies disabling START_SUBAGENT while leaving RUN_WORKFLOW enabled permits subagent options."""
+    cfg = types.CapabilitiesConfig(
+        disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        max_subagent_depth=2,
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(cfg.max_subagent_depth, 2)
+    self.assertEqual(cfg.allowed_subagents, ["worker"])
+    sub_caps = types.SubagentCapabilities(
+        disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(sub_caps.allowed_subagents, ["worker"])
 
   def test_subagent_ask_question_warning_when_not_interactive(self):
     """Verifies that a warning is logged for SubagentCapabilities."""
@@ -1857,6 +1897,53 @@ class ChatResponseStreamTest(unittest.IsolatedAsyncioTestCase):
     )
     self.assertEqual(await response.text(), "")
 
+  async def test_workflow_result_subclasses_chat_response(self):
+    """Verifies WorkflowResult subclasses ChatResponse and preserves turn accessors."""
+    direct = types.WorkflowResult(
+        script_path="/tmp/wf.py",
+        description="Run wf",
+        output="phase 1: ok",
+        response_text="All done.",
+    )
+    self.assertIsInstance(direct, types.ChatResponse)
+    self.assertEqual(direct.script_path, "/tmp/wf.py")
+    self.assertEqual(direct.description, "Run wf")
+    self.assertEqual(direct.output, "phase 1: ok")
+    self.assertEqual(direct.response_text, "All done.")
+    self.assertEqual(await direct.text(), "All done.")
+
+    async def mock_stream():
+      yield types.Thought(step_index=1, text="thinking...")
+      yield types.Text(step_index=2, text="Final summary.")
+
+    mock_conv = mock.MagicMock(spec=conversation.Conversation)
+    mock_conv.get_last_structured_output.return_value = {"passed": True}
+    mock_conv.last_turn_usage = types.UsageMetadata(
+        prompt_token_count=10,
+        candidates_token_count=5,
+        total_token_count=15,
+    )
+    mock_conv._last_turn_stop_reason = types.StopReason.UNSPECIFIED
+
+    chat_resp = types.ChatResponse(mock_stream(), conversation=mock_conv)
+    response_text = await chat_resp.text()
+    wf_res = types.WorkflowResult._from_chat_response(
+        chat_resp,
+        script_path="/tmp/wf.py",
+        description="Run wf",
+        output="phase 1: ok",
+        response_text=response_text,
+    )
+    self.assertIsInstance(wf_res, types.ChatResponse)
+    self.assertEqual(wf_res.output, "phase 1: ok")
+    self.assertEqual(wf_res.response_text, "Final summary.")
+    self.assertEqual(await wf_res.text(), "Final summary.")
+    self.assertEqual(await wf_res.structured_output(), {"passed": True})
+    self.assertEqual([t async for t in wf_res.thoughts], ["thinking..."])
+    self.assertIsNotNone(wf_res.usage_metadata)
+    self.assertEqual(wf_res.usage_metadata.total_token_count, 15)
+    self.assertEqual(wf_res.stop_reason, types.StopReason.UNSPECIFIED)
+
 
 class McpServerConfigTest(parameterized.TestCase):
   """Validates the McpServerConfig Pydantic models and required fields."""
@@ -2152,7 +2239,10 @@ class SubagentCapabilitiesTest(unittest.TestCase):
         pydantic.ValidationError, "START_SUBAGENT is disabled or omitted"
     ):
       types.SubagentCapabilities(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           allowed_subagents=["worker"],
       )
 

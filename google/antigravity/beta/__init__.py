@@ -196,12 +196,15 @@ def _is_class_member(obj: Any) -> bool:
 
 
 def _extract_name(obj: Any) -> str:
-  """Extracts `__name__` from functions, classes, classmethods, staticmethods, or properties."""
+  """Extracts `__name__` from modules, functions, classes, classmethods, staticmethods, or properties."""
   if isinstance(obj, (classmethod, staticmethod)):
     return getattr(obj.__func__, "__name__", "")
   if isinstance(obj, property) and obj.fget is not None:
     return getattr(obj.fget, "__name__", "")
-  return getattr(obj, "__name__", "")
+  name = getattr(obj, "__name__", "")
+  if isinstance(obj, type(sys)):
+    return name.rpartition(".")[-1]
+  return name
 
 
 @overload

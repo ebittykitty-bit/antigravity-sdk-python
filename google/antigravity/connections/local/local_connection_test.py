@@ -2449,6 +2449,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     expected_harness_side_tools = localharness_pb2.HarnessSideTools(
         view_file=localharness_pb2.ViewFileToolConfig(enabled=True),
         subagents=localharness_pb2.SubagentsConfig(enabled=False),
+        run_workflow=localharness_pb2.RunWorkflowToolConfig(enabled=False),
         user_questions=localharness_pb2.UserQuestionsConfig(enabled=False),
         run_command=localharness_pb2.RunCommandToolConfig(
             enabled=False,

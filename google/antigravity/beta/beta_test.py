@@ -16,6 +16,7 @@
 
 import asyncio
 import copy
+import types as py_types
 from unittest import mock
 
 from absl.testing import absltest
@@ -86,6 +87,12 @@ class BetaNamespaceTest(absltest.TestCase):
     self.assertIs(beta_pkg.PublicBetaWidget, _InternalBetaWidget)
     self.assertIn("parens_helper", beta_pkg.__all__)
     self.assertEqual(beta_pkg.parens_helper(), "ok")
+
+    dummy_mod = py_types.ModuleType("google.antigravity.experimental_submod")
+    beta(dummy_mod)
+    self.assertTrue(is_beta(dummy_mod))
+    self.assertIn("experimental_submod", beta_pkg.__all__)
+    self.assertIs(beta_pkg.experimental_submod, dummy_mod)
 
   def test_module_pep562_getattr_and_dir_lazy_discovery(self):
     """Verifies PEP 562 `__getattr__` and `__dir__` on `beta` module."""

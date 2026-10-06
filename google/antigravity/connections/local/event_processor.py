@@ -272,6 +272,38 @@ def _extract_tool_args(
   return {}
 
 
+def _parse_run_workflow_step(
+    sub_msg: dict[str, Any],
+) -> tuple[types.WorkflowProgress, dict[str, Any]]:
+  """Parses a `run_workflow` proto dict into WorkflowProgress and tool args."""
+  raw_script_path = sub_msg.get("script_path", "")
+  normalized_script_path = (
+      normalize_wire_path(raw_script_path)
+      if isinstance(raw_script_path, str)
+      else ""
+  )
+  script_val = sub_msg.get("script", "")
+  script = script_val if isinstance(script_val, str) else ""
+  desc_val = sub_msg.get("description", "")
+  description = desc_val if isinstance(desc_val, str) else ""
+  out_val = sub_msg.get("output", "")
+  output = out_val if isinstance(out_val, str) else ""
+  workflow_progress = types.WorkflowProgress(
+      script_path=normalized_script_path,
+      script=script,
+      description=description,
+      output=output,
+  )
+  tool_args: dict[str, Any] = {}
+  if "script_path" in sub_msg:
+    tool_args["script_path"] = normalized_script_path
+  if "script" in sub_msg:
+    tool_args["script"] = script
+  if "description" in sub_msg:
+    tool_args["description"] = description
+  return workflow_progress, tool_args
+
+
 class LocalConnectionStep(types.Step):
   """Connection-specific step for LocalConnection."""
 
@@ -306,7 +338,14 @@ class LocalConnectionStep(types.Step):
         (None, {}),
     )
     active_tool_name, sub_msg = active_tool_pair
-    active_tool_args = sub_msg if isinstance(sub_msg, dict) else {}
+    active_tool_args = dict(sub_msg) if isinstance(sub_msg, dict) else {}
+
+    workflow_progress: types.WorkflowProgress | None = None
+    if (
+        active_tool_name == types.BuiltinTools.RUN_WORKFLOW.value
+        and isinstance(sub_msg, dict)
+    ):
+      workflow_progress, active_tool_args = _parse_run_workflow_step(sub_msg)
 
     active_server_name = None
     active_tool_id = None
@@ -434,6 +473,7 @@ class LocalConnectionStep(types.Step):
             step_dict.get("target", ""), types.StepTarget.UNKNOWN
         ),
         structured_output=structured_output,
+        workflow_progress=workflow_progress,
     )
 
 

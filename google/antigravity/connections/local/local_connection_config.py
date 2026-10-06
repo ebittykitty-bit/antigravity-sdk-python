@@ -46,6 +46,7 @@ BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
     types.BuiltinTools.SEARCH_DIR: "search_directory",
     types.BuiltinTools.VIEW_FILE: "view_file",
     types.BuiltinTools.START_SUBAGENT: "invoke_subagent",
+    types.BuiltinTools.RUN_WORKFLOW: "run_workflow",
     types.BuiltinTools.GENERATE_IMAGE: "generate_image",
     types.BuiltinTools.SEARCH_WEB: "search_web",
     types.BuiltinTools.READ_URL_CONTENT: "read_url_content",
@@ -60,9 +61,15 @@ PROTO_FIELD_TO_SDK_NAME: dict[str, str] = {
 
 # Argument keys in tool call JSON payloads that carry wire-format URIs
 # (file:///..., cns://...) and must be normalized to clean filesystem paths.
-WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset(
-    {"path", "file_path", "directory_path", "TargetFile", "output_path"}
-)
+WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset({
+    "path",
+    "file_path",
+    "directory_path",
+    "TargetFile",
+    "output_path",
+    "script_path",
+    "ScriptPath",
+})
 
 
 def normalize_wire_path(path: str) -> str:
