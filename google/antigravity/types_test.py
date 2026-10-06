@@ -2218,6 +2218,29 @@ class SubagentConfigTest(unittest.TestCase):
       )
 
 
+class SandboxStatusTest(unittest.TestCase):
+  """Tests for the SandboxStatus model."""
+
+  def test_construction_defaults(self):
+    status = types.SandboxStatus(available=True)
+    self.assertTrue(status.available)
+    self.assertIsNone(status.unavailable_reason)
+
+  def test_construction_with_reason(self):
+    status = types.SandboxStatus(
+        available=False,
+        unavailable_reason="Sandbox not supported on current platform",
+    )
+    self.assertFalse(status.available)
+    self.assertEqual(
+        status.unavailable_reason,
+        "Sandbox not supported on current platform",
+    )
+
+  def test_is_exported_in_all(self):
+    self.assertIn("SandboxStatus", types.__all__)
+
+
 class UsageMetadataTest(unittest.TestCase):
   """Tests for the UsageMetadata class."""
 
