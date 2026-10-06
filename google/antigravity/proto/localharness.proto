@@ -244,6 +244,7 @@ message HarnessSideTools {
   .antigravity.localharness.ToolSearchConfig tool_search_config = 15;
   .antigravity.localharness.ManageTaskToolConfig manage_task = 16;
   .antigravity.localharness.ScheduleToolConfig schedule = 17;
+  .antigravity.localharness.RunWorkflowToolConfig run_workflow = 20;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -312,6 +313,10 @@ message ManageTaskToolConfig {
 }
 message ScheduleToolConfig {
   bool enabled = 1;
+}
+message RunWorkflowToolConfig {
+  bool enabled = 1;
+  .antigravity.localharness.ToolExecutionMode execution_mode = 2;
 }
 message PermissionsConfig {
   bool enforce_workspace_validation = 1;
@@ -397,6 +402,7 @@ message StepUpdate {
   .antigravity.localharness.ActionReadUrlContent read_url_content = 35;
   .antigravity.localharness.ActionCustomTool custom_tool = 36;
   .antigravity.localharness.ActionSkillLookup skill_lookup = 37;
+  .antigravity.localharness.ActionRunWorkflow run_workflow = 38;
   string request_text = 50;
   .antigravity.localharness.ToolConfirmationRequest tool_confirmation_request =
       51;
@@ -681,6 +687,12 @@ message ActionSkillLookup {
   repeated string requested_skill_names = 2;
   repeated string resolved_skill_names = 3;
   string error_message = 4;
+}
+message ActionRunWorkflow {
+  string script_path = 1;
+  string description = 2;
+  string output = 3;
+  string script = 4;
 }
 message CallHookRequest {
   oneof args {
