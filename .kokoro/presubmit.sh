@@ -51,7 +51,7 @@ python3 -m pip install \
   -r "${SCRIPT_DIR}/requirements-test.txt"
 
 echo "--- Compiling protos ---"
-python3 -m grpc_tools.protoc -I. --python_out=. google/antigravity/proto/*
+python3 -m grpc_tools.protoc -I. --python_out=. google/antigravity/proto/*.proto
 touch google/antigravity/proto/__init__.py
 
 echo "--- Installing package under test ---"
@@ -71,6 +71,7 @@ python3 -m build --wheel --no-isolation --outdir dist/
 echo "--- Verifying wheel installs and imports correctly ---"
 python3 -m pip install --force-reinstall --no-deps --no-index dist/*.whl
 python3 -c "from google.antigravity.agent import Agent; print('Import OK: Agent')"
-python3 -c "from google.antigravity.connections.local_connection import LocalConnection; print('Import OK: LocalConnection')"
+python3 -c "from google.antigravity.connections.local.local_connection import LocalConnection; print('Import OK: LocalConnection')"
+python3 -c "from google.antigravity.proto import content_pb2, localharness_pb2, skill_pb2; print('Import OK: protos')"
 
 echo "--- Presubmit passed ---"
