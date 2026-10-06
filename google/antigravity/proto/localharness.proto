@@ -540,6 +540,7 @@ message TrajectoryStateUpdate {
     STATE_FULLY_IDLE = 2;
     STATE_CANCELLED = 3;
     STATE_WAITING_FOR_TASKS = 4;
+    STATE_WAITING_FOR_SUBAGENTS = 5;
   }
   enum StopReason {
     STOP_REASON_UNSPECIFIED = 0;
