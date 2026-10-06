@@ -34,6 +34,7 @@ message StateUpdate {
     STATE_WAITING_FOR_TASKS = 2;
     STATE_FULLY_IDLE = 3;
     STATE_CANCELLED = 4;
+    STATE_WAITING_FOR_SUBAGENTS = 5;
   }
   string parent_interaction_id = 7;
   .genai.StateUpdate.State state = 3;
