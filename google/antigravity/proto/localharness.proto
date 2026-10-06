@@ -790,6 +790,7 @@ message SubagentSkillsConfig {
   message NoneConfig {}
   message OverrideConfig {
     repeated string skills_paths = 1;
+    repeated .antigravity.localharness.SkillSource skill_sources = 2;
   }
   oneof mode {
     .antigravity.localharness.SubagentSkillsConfig.InheritConfig
