@@ -17,6 +17,7 @@ edition = "2024";
 package antigravity.localharness;
 
 import "google/antigravity/proto/content.proto";
+import "google/antigravity/proto/skill.proto";
 
 enum LifecycleHook {
   LIFECYCLE_HOOK_UNSPECIFIED = 0;
@@ -297,8 +298,10 @@ message ToolSearchConfig {
   extensions 1000 to max;
 }
 message SkillSource {
-  reserved 1;
-  string directory_path = 2;
+  oneof source {
+    .genai.skills.Skill skill = 1;
+    string directory_path = 2;
+  }
 }
 message SkillsConfig {
   bool enabled = 1 [default = true];
