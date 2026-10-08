@@ -61,3 +61,17 @@ interaction:
 This structure allows the user to interact with a simple, high-level `Agent`
 interface while the `Conversation` and `Connection` handle the state management
 and transport details under the hood.
+
+## Beta Namespaces (`google.antigravity.beta` & `Agent.beta`)
+
+Experimental features are isolated under beta namespaces and are subject to
+change:
+
+-   **Module-level exports**: Import experimental classes, configurations, and
+    functions from `google.antigravity.beta` (e.g.,
+    `from google.antigravity.beta import NewClass` or
+    `from google.antigravity import beta`).
+-   **Owned methods**: Experimental methods and properties on `Agent` (or other
+    core SDK classes) are accessed via the `.beta` namespace attribute (e.g.,
+    `await agent.beta.new_method(...)` on an instance, or
+    `Agent.beta.new_method(...)` on the class).

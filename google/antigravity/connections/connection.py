@@ -96,6 +96,7 @@ class AgentConfig(abc.ABC, pydantic.BaseModel):
   app_data_dir: str | None = None
   response_schema: dict[str, Any] | type[pydantic.BaseModel] | str | None = None
   skills_paths: list[str] = pydantic.Field(default_factory=list)
+  inline_skills: list[types.InlineSkill] = pydantic.Field(default_factory=list)
   subagents: list[types.SubagentConfig] = pydantic.Field(default_factory=list)
   debug_config: DebugConfig | None = None
   # Optional retry configuration. Supported by Local, RemoteWebsocket, and JPv2

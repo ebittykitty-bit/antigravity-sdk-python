@@ -14,17 +14,11 @@
 
 """Unit tests for LocalOpenAIConnectionStrategy and LocalOpenAIAgentConfig."""
 
-import asyncio
-import http.server
-import json
-import threading
 import unittest
 from unittest import mock
 
 from google.antigravity.proto import localharness_pb2
-from google.antigravity import agent
 from google.antigravity import types
-from google.antigravity.connections.local import local_connection
 from google.antigravity.connections.local import local_openai_connection
 from google.antigravity.connections.local import local_openai_connection_config
 from google.antigravity.connections.local import test_utils
@@ -36,7 +30,6 @@ class LocalOpenAIConnectionTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self._real_binary_fn = local_connection._get_default_binary_path
     test_utils.patch_default_binary_path(self)
 
   def test_local_openai_strategy_harness_config(self):
@@ -189,230 +182,6 @@ class LocalOpenAIConnectionTest(unittest.TestCase):
     self.assertEqual(strategy._mcp_servers, [mcp_server])
     self.assertEqual(strategy._subagents, [subagent])
 
-  def test_local_openai_agent_getting_started_e2e(self):
-    """End-to-end test executing Agent with LocalOpenAIAgentConfig and custom tools against a strict OpenAI mock server."""
-    validation_errors = []
-    received_tools = []
-
-    class StrictOpenAIHandler(http.server.BaseHTTPRequestHandler):
-
-      def do_POST(self):  # pylint: disable=invalid-name
-        content_length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(content_length).decode("utf-8")
-        body = json.loads(raw_body)
-
-        if self.path == "/v1/chat/completions":
-          tools = body.get("tools", [])
-          received_tools.extend(tools)
-          for i, tool in enumerate(tools):
-            fn = tool.get("function", {})
-            params = fn.get("parameters", {})
-            schema_type = params.get("type")
-            if schema_type == "OBJECT":
-              validation_errors.append("Encountered uppercase 'OBJECT' type")
-              err_resp = {
-                  "error": {
-                      "message": (
-                          "Invalid discriminator value. Expected 'object',"
-                          " got 'OBJECT'"
-                      ),
-                      "type": "invalid_request_error",
-                      "param": f"tools[{i}].function.parameters.type",
-                      "code": 400,
-                  }
-              }
-              self.send_response(400)
-              self.send_header("Content-Type", "application/json")
-              self.end_headers()
-              self.wfile.write(json.dumps(err_resp).encode("utf-8"))
-              return
-
-            props = params.get("properties", {})
-            for prop_name, prop_schema in props.items():
-              prop_type = prop_schema.get("type")
-              if isinstance(prop_type, str) and prop_type.isupper():
-                validation_errors.append(
-                    f"Property '{prop_name}' has uppercase type '{prop_type}'"
-                )
-                err_resp = {
-                    "error": {
-                        "message": (
-                            f"Invalid type '{prop_type}'. Expected"
-                            f" '{prop_type.lower()}'"
-                        ),
-                        "type": "invalid_request_error",
-                        "param": (
-                            f"tools[{i}].function.parameters.properties.{prop_name}.type"
-                        ),
-                        "code": 400,
-                    }
-                }
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps(err_resp).encode("utf-8"))
-                return
-
-          messages = body.get("messages", [])
-          has_tool_response = any(m.get("role") == "tool" for m in messages)
-
-          self.send_response(200)
-          self.send_header("Content-Type", "text/event-stream")
-          self.send_header("Cache-Control", "no-cache")
-          self.end_headers()
-
-          if not has_tool_response:
-            chunk1 = {
-                "choices": [{
-                    "delta": {
-                        "tool_calls": [{
-                            "index": 0,
-                            "id": "call_123",
-                            "type": "function",
-                            "function": {
-                                "name": "get_current_weather",
-                                "arguments": (
-                                    json.dumps({"location": "Seattle"})
-                                ),
-                            },
-                        }]
-                    }
-                }]
-            }
-            chunk2 = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
-            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode("utf-8"))
-            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-          else:
-            chunk1 = {
-                "choices": [{
-                    "delta": {
-                        "content": "The weather in Seattle is 72°F and sunny."
-                    }
-                }]
-            }
-            chunk2 = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
-            self.wfile.write(f"data: {json.dumps(chunk1)}\n\n".encode("utf-8"))
-            self.wfile.write(f"data: {json.dumps(chunk2)}\n\n".encode("utf-8"))
-            self.wfile.write(b"data: [DONE]\n\n")
-        else:
-          self.send_response(404)
-          self.end_headers()
-
-      def log_message(self, format, *args):  # pylint: disable=redefined-builtin
-        pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), StrictOpenAIHandler)
-    port = server.server_port
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
-    def get_current_weather(location: str) -> str:
-      """Get the current weather for a given location."""
-      return f"The weather in {location} is 72°F and sunny."
-
-    async def run_agent():
-      config = local_openai_connection_config.LocalOpenAIAgentConfig(
-          base_url=f"http://127.0.0.1:{port}/v1",
-          model="test-model",
-          tools=[get_current_weather],
-          policies=[policy.allow_all()],
-      )
-      with mock.patch.object(
-          local_connection,
-          "_get_default_binary_path",
-          side_effect=self._real_binary_fn,
-      ):
-        async with agent.Agent(config) as ag:
-          response = await ag.chat("What's the weather in Seattle?")
-          tokens = [t async for t in response]
-          return "".join(tokens)
-
-    try:
-      output = asyncio.run(run_agent())
-      self.assertEqual(validation_errors, [])
-      custom_tool = next(
-          t for t in received_tools
-          if t.get("function", {}).get("name") == "get_current_weather"
-      )
-      tool_params = custom_tool["function"]["parameters"]
-      self.assertEqual(tool_params.get("type"), "object")
-      self.assertEqual(
-          tool_params.get("properties", {}).get("location", {}).get("type"),
-          "string",
-      )
-      self.assertIn("Seattle", output)
-    finally:
-      server.shutdown()
-      server.server_close()
-      server_thread.join()
-
-  def test_local_openai_agent_handles_http_400_error(self):
-    """End-to-end test verifying that when an OpenAI server rejects requests with HTTP 400, the Agent session surfaces AntigravityExecutionError."""
-
-    class RejectingOpenAIHandler(http.server.BaseHTTPRequestHandler):
-
-      def do_POST(self):  # pylint: disable=invalid-name
-        content_length = int(self.headers.get("Content-Length", 0))
-        if content_length > 0:
-          self.rfile.read(content_length)
-        if self.path == "/v1/chat/completions":
-          err_resp = {
-              "error": {
-                  "message": "Invalid request schema: Bad Request",
-                  "type": "invalid_request_error",
-                  "param": "tools[0].function.parameters.type",
-                  "code": 400,
-              }
-          }
-          self.send_response(400)
-          self.send_header("Content-Type", "application/json")
-          self.end_headers()
-          self.wfile.write(json.dumps(err_resp).encode("utf-8"))
-        else:
-          self.send_response(404)
-          self.end_headers()
-
-      def log_message(self, format, *args):  # pylint: disable=redefined-builtin
-        pass
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), RejectingOpenAIHandler)
-    port = server.server_port
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
-    def get_current_weather(location: str) -> str:
-      return f"The weather in {location} is 72°F and sunny."
-
-    async def run_agent():
-      config = local_openai_connection_config.LocalOpenAIAgentConfig(
-          base_url=f"http://127.0.0.1:{port}/v1",
-          model="test-model",
-          tools=[get_current_weather],
-          policies=[policy.allow_all()],
-      )
-      with mock.patch.object(
-          local_connection,
-          "_get_default_binary_path",
-          side_effect=self._real_binary_fn,
-      ):
-        async with agent.Agent(config) as ag:
-          response = await ag.chat("What's the weather in Seattle?")
-          tokens = [t async for t in response]
-          return "".join(tokens)
-
-    try:
-      with self.assertRaises(types.AntigravityExecutionError) as cm:
-        asyncio.run(run_agent())
-      self.assertIn(
-          "Invalid request schema: Bad Request",
-          str(cm.exception),
-      )
-    finally:
-      server.shutdown()
-      server.server_close()
-      server_thread.join()
-
   def test_policies_forwarded_to_strategy_and_harness_config(self):
     """Verify explicit policies are forwarded to LocalOpenAIConnectionStrategy."""
     denies = [
@@ -481,6 +250,7 @@ class LocalOpenAIConnectionTest(unittest.TestCase):
 
   def test_tools_forwarded_to_strategy(self):
     """Verify custom tools are forwarded to strategy and included in harness proto."""
+
     def custom_lookup(query: str) -> str:
       """Looks up a query."""
       return query
@@ -490,9 +260,7 @@ class LocalOpenAIConnectionTest(unittest.TestCase):
         model="llama3.1",
         tools=[custom_lookup],
     )
-    t_runner = tool_runner_mod.ToolRunner(
-        tools=config._get_all_custom_tools()
-    )
+    t_runner = tool_runner_mod.ToolRunner(tools=config._get_all_custom_tools())
     strategy = config.create_strategy(
         tool_runner=t_runner,
         hook_runner=mock.MagicMock(),

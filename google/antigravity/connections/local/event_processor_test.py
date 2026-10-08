@@ -304,6 +304,34 @@ class LocalConnectionStepFromDictTest(absltest.TestCase):
     )
     self.assertEqual(step.tool_calls[0].canonical_path, "/tmp/sunset_123.png")
 
+  def test_step_type_tool_call_with_run_workflow(self):
+    """Verifies that a step with run_workflow populates workflow_progress and ToolCall."""
+    step = event_processor.LocalConnectionStep.from_dict({
+        "source": "SOURCE_MODEL",
+        "state": "STATE_DONE",
+        "run_workflow": {
+            "script_path": "file:///tmp/ws/pipeline.py",
+            "description": "Audit modules",
+            "output": "All clean",
+        },
+    })
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+    self.assertLen(step.tool_calls, 1)
+    self.assertEqual(step.tool_calls[0].name, "run_workflow")
+    self.assertEqual(
+        step.tool_calls[0].args,
+        {
+            "script_path": "/tmp/ws/pipeline.py",
+            "description": "Audit modules",
+        },
+    )
+    self.assertEqual(step.tool_calls[0].canonical_path, "/tmp/ws/pipeline.py")
+    self.assertIsNotNone(step.workflow_progress)
+    assert step.workflow_progress is not None
+    self.assertEqual(step.workflow_progress.script_path, "/tmp/ws/pipeline.py")
+    self.assertEqual(step.workflow_progress.description, "Audit modules")
+    self.assertEqual(step.workflow_progress.output, "All clean")
+
   def test_generate_image_result_model_output_path(self):
     """Verifies GenerateImageResult field and string output formatting."""
     res = local_types.GenerateImageResult(
@@ -1157,6 +1185,107 @@ class PolicyDecisionTest(unittest.IsolatedAsyncioTestCase):
         resp.outcome, localharness_pb2.POLICY_EVALUATION_OUTCOME_DENY
     )
     self.assertIn("requires ask_user handler", resp.deny_reason)
+
+  def test_run_workflow_step_from_proto_message_to_dict(self):
+    """Round-trips a StepUpdate with ActionRunWorkflow through json_format.MessageToDict."""
+    su = localharness_pb2.StepUpdate(
+        cascade_id="c-1",
+        trajectory_id="c-1",
+        step_index=3,
+        state=localharness_pb2.StepUpdate.STATE_DONE,
+        source=localharness_pb2.StepUpdate.SOURCE_MODEL,
+        target=localharness_pb2.StepUpdate.TARGET_ENVIRONMENT,
+        run_workflow=localharness_pb2.ActionRunWorkflow(
+            script_path="/workspace/wf.py",
+            description="Audit repo",
+            output="Audit completed.",
+        ),
+    )
+    step_dict = event_processor.json_format.MessageToDict(
+        su, preserving_proto_field_name=True
+    )
+    step = event_processor.LocalConnectionStep.from_dict(step_dict)
+    self.assertEqual(step.type, types.StepType.TOOL_CALL)
+    self.assertEqual(len(step.tool_calls), 1)
+    self.assertEqual(step.tool_calls[0].name, "run_workflow")
+    self.assertIsNotNone(step.workflow_progress)
+    assert step.workflow_progress is not None
+    self.assertEqual(step.workflow_progress.script_path, "/workspace/wf.py")
+    self.assertEqual(step.workflow_progress.description, "Audit repo")
+    self.assertEqual(step.workflow_progress.output, "Audit completed.")
+
+
+class BaseLocalEventProcessorTest(unittest.IsolatedAsyncioTestCase):
+  """Tests for BaseLocalEventProcessor shared runtime helpers."""
+
+  async def test_local_harness_processor_subclasses_base(self):
+    processor = event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=mock.AsyncMock()
+    )
+    self.assertIsInstance(processor, event_processor.BaseLocalEventProcessor)
+
+  async def test_base_process_event_raises_not_implemented(self):
+    base = event_processor.BaseLocalEventProcessor()
+    with self.assertRaises(NotImplementedError):
+      await base.process_event(object())
+
+  async def test_emit_step_records_main_trajectory_and_dispatches_hooks(self):
+    hook_runner = mock.MagicMock()
+    hook_runner.dispatch_pre_step = mock.AsyncMock()
+    hook_runner.dispatch_post_step = mock.AsyncMock()
+
+    base = event_processor.BaseLocalEventProcessor(
+        hook_runner=hook_runner,
+    )
+    step = event_processor.LocalConnectionStep(
+        id="traj_1_1",
+        step_index=1,
+        trajectory_id="traj_1",
+        type=types.StepType.TEXT_RESPONSE,
+        source=types.StepSource.MODEL,
+        status=types.StepStatus.DONE,
+        content="hello",
+    )
+    await base._emit_step(step, dispatch_pre=True, dispatch_post=True)
+
+    self.assertEqual(base.main_trajectory_id, "traj_1")
+    queued = await base.step_queue.get()
+    self.assertEqual(queued.content, "hello")
+    hook_runner.dispatch_pre_step.assert_awaited_once()
+    hook_runner.dispatch_post_step.assert_awaited_once()
+
+    # Default arguments (dispatch_pre=False, dispatch_post=False) do not invoke
+    # step hooks, and a second step with a different trajectory_id preserves the
+    # initial main_trajectory_id.
+    hook_runner.dispatch_pre_step.reset_mock()
+    hook_runner.dispatch_post_step.reset_mock()
+    step2 = event_processor.LocalConnectionStep(
+        id="traj_2_1",
+        step_index=1,
+        trajectory_id="traj_2",
+        type=types.StepType.TEXT_RESPONSE,
+        source=types.StepSource.MODEL,
+        status=types.StepStatus.DONE,
+        content="subagent step",
+    )
+    await base._emit_step(step2)
+    self.assertEqual(base.main_trajectory_id, "traj_1")
+    queued2 = await base.step_queue.get()
+    self.assertEqual(queued2.content, "subagent step")
+    hook_runner.dispatch_pre_step.assert_not_awaited()
+    hook_runner.dispatch_post_step.assert_not_awaited()
+
+    # Setting _current_turn_context passes that context instance to step hooks.
+    explicit_turn_ctx = mock.MagicMock()
+    base._current_turn_context = explicit_turn_ctx
+    await base._emit_step(step, dispatch_pre=True, dispatch_post=True)
+    _ = await base.step_queue.get()
+    hook_runner.dispatch_pre_step.assert_awaited_once_with(
+        explicit_turn_ctx, step
+    )
+    hook_runner.dispatch_post_step.assert_awaited_once_with(
+        explicit_turn_ctx, step
+    )
 
 
 if __name__ == "__main__":

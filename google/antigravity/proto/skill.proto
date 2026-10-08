@@ -14,8 +14,29 @@
 
 edition = "2024";
 
-package genai;
+package genai.skills;
 
-import "google/antigravity/proto/genai_json_annotations.proto";
+option features = {};
 
-option features = { field_presence : IMPLICIT enum_type : OPEN utf8_validation : NONE };
+message SkillFile {
+  oneof content {
+    string text = 2;
+    bytes data = 3;
+  }
+  string mime_type = 1;
+}
+message Skill {
+  message InlineResources {
+    map<string, .genai.skills.SkillFile> resources = 1;
+  }
+  oneof resources {
+    .genai.skills.Skill.InlineResources inline_resources = 7;
+    .genai.skills.SkillFile zipped_resources = 8;
+  }
+  string name = 1;
+  string skill_id = 2;
+  string description = 3;
+  string content = 4;
+  repeated string allowed_tools = 5;
+  map<string, string> metadata = 6;
+}

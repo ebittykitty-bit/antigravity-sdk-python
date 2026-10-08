@@ -46,6 +46,7 @@ BUILTIN_TOOL_PROTO_FIELDS: dict[types.BuiltinTools, str] = {
     types.BuiltinTools.SEARCH_DIR: "search_directory",
     types.BuiltinTools.VIEW_FILE: "view_file",
     types.BuiltinTools.START_SUBAGENT: "invoke_subagent",
+    types.BuiltinTools.RUN_WORKFLOW: "run_workflow",
     types.BuiltinTools.GENERATE_IMAGE: "generate_image",
     types.BuiltinTools.SEARCH_WEB: "search_web",
     types.BuiltinTools.READ_URL_CONTENT: "read_url_content",
@@ -60,9 +61,15 @@ PROTO_FIELD_TO_SDK_NAME: dict[str, str] = {
 
 # Argument keys in tool call JSON payloads that carry wire-format URIs
 # (file:///..., cns://...) and must be normalized to clean filesystem paths.
-WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset(
-    {"path", "file_path", "directory_path", "TargetFile", "output_path"}
-)
+WIRE_PATH_ARGUMENT_KEYS: frozenset[str] = frozenset({
+    "path",
+    "file_path",
+    "directory_path",
+    "TargetFile",
+    "output_path",
+    "script_path",
+    "ScriptPath",
+})
 
 
 def normalize_wire_path(path: str) -> str:
@@ -182,6 +189,16 @@ class BaseLocalAgentConfig(connection.AgentConfig):
           )
     return self
 
+  @pydantic.model_validator(mode="after")
+  def _validate_skills_sources(self) -> "BaseLocalAgentConfig":
+    if self.skills_paths and self.inline_skills:
+      raise ValueError(
+          "combining inline_skills and skills_paths is not supported by"
+          " LocalHarness; provide either inline_skills or skills_paths, not"
+          " both."
+      )
+    return self
+
   def _get_system_instructions(self) -> types.SystemInstructions | None:
     """Returns the system instructions, normalizing shorthand if needed."""
     if isinstance(self.system_instructions, str):
@@ -244,6 +261,7 @@ class LocalAgentConfig(BaseLocalAgentConfig):
           dict[str, Any] | type[pydantic.BaseModel] | str | None
       ) = None,
       skills_paths: list[str] | None = None,
+      inline_skills: list[types.InlineSkill] | None = None,
       retry_config: types.RetryConfig | None = None,
       budget_config: types.BudgetConfig | None = None,
       compaction_config: types.CompactionConfig | None = None,
@@ -364,6 +382,58 @@ class LocalAgentConfig(BaseLocalAgentConfig):
     from google.antigravity.connections.local import local_connection  # pylint: disable=g-import-not-at-top
 
     return local_connection.LocalConnectionStrategy(
+        tool_runner=tool_runner,
+        hook_runner=hook_runner,
+        models=self.models,
+        system_instructions=self._get_system_instructions(),
+        capabilities_config=self.capabilities,
+        compaction_config=self._get_effective_compaction_config(),
+        conversation_id=self.conversation_id,
+        session_continuation_mode=self.session_continuation_mode,
+        save_dir=self._get_or_create_save_dir(),
+        workspaces=self.workspaces,
+        app_data_dir=self.app_data_dir,
+        skills_paths=self.skills_paths,
+        inline_skills=self.inline_skills,
+        mcp_servers=self.mcp_servers,
+        env=self.env,
+        subagents=self.subagents,
+        debug_config=self.debug_config,
+        retry_config=self.retry_config,
+        budget_config=self.budget_config,
+        policies=list(self.policies) if self.policies is not None else None,
+        tools=self.tools,
+    )
+
+
+class InteractionsAgentConfig(LocalAgentConfig):
+  """Configuration for the local harness backend using the GAOS Interactions API.
+
+  Inherits all fields, validators, and model shorthand resolution from
+  ``LocalAgentConfig``, and creates an ``InteractionsConnectionStrategy``
+  that speaks the GAOS Interactions JSON protocol over WebSocket to
+  ``localharness``.
+  """
+
+  @pydantic.model_validator(mode="after")
+  def _validate_triggers(self) -> "InteractionsAgentConfig":
+    """Validates that unsupported triggers are not configured."""
+    if self.triggers:
+      raise types.AntigravityValidationError(
+          "Automated triggers are not yet supported with"
+          " InteractionsAgentConfig."
+      )
+    return self
+
+  def create_strategy(
+      self,
+      *,
+      tool_runner: Any,
+      hook_runner: Any,
+  ) -> "connection.ConnectionStrategy":
+    from google.antigravity.connections.local import interactions_connection  # pylint: disable=g-import-not-at-top
+
+    return interactions_connection.InteractionsConnectionStrategy(
         tool_runner=tool_runner,
         hook_runner=hook_runner,
         models=self.models,

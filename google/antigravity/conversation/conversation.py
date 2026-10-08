@@ -177,8 +177,8 @@ class Conversation:
       # ID are always yielded since we cannot determine duplicates.
       if step.tool_calls:
         for call in step.tool_calls:
-          if call.id is None or call.id not in seen_tool_ids:
-            if call.id is not None:
+          if not call.id or call.id not in seen_tool_ids:
+            if call.id:
               seen_tool_ids.add(call.id)
             yield call
 

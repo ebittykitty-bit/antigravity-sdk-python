@@ -18,7 +18,6 @@ import asyncio
 import collections
 import importlib.metadata
 import importlib.resources
-import inspect
 import json
 import logging
 import os
@@ -32,7 +31,6 @@ import sys
 import threading
 from typing import Any, AsyncIterator, Callable, Sequence, cast
 
-from google.genai import types as genai_types
 from google.protobuf import json_format
 from typing_extensions import override
 import websockets
@@ -41,10 +39,10 @@ from google.antigravity.proto import localharness_pb2
 from google.antigravity import types
 from google.antigravity.connections import connection
 from google.antigravity.connections.local import event_processor
+from google.antigravity.connections.local import interactions_config_converter
 from google.antigravity.connections.local import local_connection_config
 from google.antigravity.hooks import hook_runner as h_runner
 from google.antigravity.hooks import policy
-from google.antigravity.tools import schema_utils
 from google.antigravity.tools import tool_runner as t_runner
 
 LocalConnectionStep = event_processor.LocalConnectionStep
@@ -265,10 +263,10 @@ def callable_to_tool_proto(
 ) -> localharness_pb2.Tool:
   """Converts a Python callable to a localharness Tool proto.
 
-  Uses google.genai.types.FunctionDeclaration for schema extraction.
-  If a ``tool_runner`` is provided, the runner's ``get_public_callable``
-  is used to strip injectable parameters (e.g. ``ToolContext``) from
-  the schema so the model never sees them.
+  Uses interactions_config_converter.callable_to_function_tool_dict for schema
+  extraction and normalization. If a ``tool_runner`` is provided, the runner's
+  ``get_public_callable`` is used to strip injectable parameters (e.g.
+  ``ToolContext``) from the schema so the model never sees them.
 
   Args:
       fn: The Python callable to convert.
@@ -277,53 +275,13 @@ def callable_to_tool_proto(
   Returns:
       A localharness_pb2.Tool proto.
   """
-  if isinstance(fn, t_runner.ToolWithSchema):
-    return localharness_pb2.Tool(
-        name=getattr(fn, "__name__", ""),
-        description=fn.__doc__ or "",
-        parameters_json_schema=json.dumps(
-            schema_utils.normalize_schema(fn.input_schema)
-        ),
-    )
-
-  # Use the ToolRunner's public callable to strip injectable params.
-  target_fn = fn
-  tool_name = getattr(fn, "__name__", None) or type(fn).__name__
-  if tool_runner is not None and tool_name in tool_runner.tools:
-    target_fn = tool_runner.get_public_callable(tool_name)
-
-  if not hasattr(target_fn, "__name__"):
-    orig_fn = target_fn
-
-    def wrapped(*args, **kwargs):
-      return orig_fn(*args, **kwargs)
-
-    wrapped.__name__ = tool_name
-    setattr(wrapped, "__doc__", getattr(orig_fn, "__doc__", None))
-    try:
-      setattr(wrapped, "__signature__", inspect.signature(orig_fn))
-    except (ValueError, TypeError):
-      setattr(
-          wrapped, "__annotations__", getattr(orig_fn, "__annotations__", {})
-      )
-    target_fn = wrapped
-
-  decl = genai_types.FunctionDeclaration.from_callable_with_api_option(
-      callable=target_fn,
-      api_option="GEMINI_API",
+  fn_dict = interactions_config_converter.callable_to_function_tool_dict(
+      fn, tool_runner=tool_runner
   )
-  if decl.parameters:
-    parameters = decl.parameters.model_dump(exclude_none=True)
-  elif decl.parameters_json_schema:
-    parameters = decl.parameters_json_schema
-  else:
-    parameters = {"type": "object", "properties": {}}
   return localharness_pb2.Tool(
-      name=decl.name,
-      description=decl.description or "",
-      parameters_json_schema=json.dumps(
-          schema_utils.normalize_schema(parameters)
-      ),
+      name=fn_dict["name"],
+      description=fn_dict.get("description", ""),
+      parameters_json_schema=json.dumps(fn_dict["parameters"]),
   )
 
 
@@ -415,8 +373,7 @@ class LocalConnection(connection.Connection):
     # expected closures from harness crashes.
     self._disconnecting = False
 
-    self._processor = event_processor.LocalHarnessEventProcessor(
-        send_input_event_fn=self._send_input_event,
+    self._processor = self._create_event_processor(
         hook_runner=hook_runner,
         tool_runner=tool_runner,
         dynamic_policy_map=dynamic_policy_map,
@@ -431,6 +388,25 @@ class LocalConnection(connection.Connection):
     # error messages when the WebSocket closes unexpectedly.
     self._stderr_lines: collections.deque[str] = collections.deque(maxlen=100)
     self._stderr_thread: threading.Thread | None = None
+
+  def _create_event_processor(
+      self,
+      *,
+      hook_runner: h_runner.HookRunner | None,
+      tool_runner: t_runner.ToolRunner | None,
+      dynamic_policy_map: dict[str, "policy.Policy"] | None,
+      initial_usage: types.UsageMetadata | None,
+      initial_trajectory_usages: dict[str, types.UsageMetadata] | None,
+  ) -> event_processor.BaseLocalEventProcessor:
+    """Creates the protocol-specific event processor for this connection."""
+    return event_processor.LocalHarnessEventProcessor(
+        send_input_event_fn=self._send_input_event,
+        hook_runner=hook_runner,
+        tool_runner=tool_runner,
+        dynamic_policy_map=dynamic_policy_map,
+        initial_usage=initial_usage,
+        initial_trajectory_usages=initial_trajectory_usages,
+    )
 
   @property
   def is_idle(self) -> bool:
@@ -584,6 +560,12 @@ class LocalConnection(connection.Connection):
     t.start()
     self._stderr_thread = t
 
+  async def _send_session_end_request(self) -> None:
+    """Sends a session-end request to the harness before disconnecting."""
+    await self._send_input_event(
+        localharness_pb2.InputEvent(session_end_request=True)
+    )
+
   async def disconnect(self) -> None:
     """Tears down the harness connection in a careful order."""
     self._disconnecting = True
@@ -592,9 +574,7 @@ class LocalConnection(connection.Connection):
     # Dispatch session end hook before tearing down via Go localharness RPC.
     if self._hook_runner and self._hook_runner.on_session_end_hooks:
       try:
-        await self._send_input_event(
-            localharness_pb2.InputEvent(session_end_request=True)
-        )
+        await self._send_session_end_request()
         await self._processor.session_end_done.wait()
       except Exception as e:  # pylint: disable=broad-except
         hook_error = e
@@ -630,6 +610,19 @@ class LocalConnection(connection.Connection):
           except subprocess.TimeoutExpired:
             self._process.kill()
             self._process.wait(timeout=1)
+
+        if self._stderr_thread:
+          self._stderr_thread.join(timeout=1.0)
+
+        returncode = self._process.poll()
+        if returncode is None:
+          returncode = self._process.returncode
+        if isinstance(returncode, int) and returncode != 0:
+          stderr_tail = "\n".join(self._stderr_lines) or "(no stderr output)"
+          raise types.AntigravityExecutionError(
+              f"Harness process exited with code {returncode}."
+              f"\nHarness stderr:\n{stderr_tail}"
+          )
     finally:
       if hook_error is not None:
         raise hook_error
@@ -640,14 +633,18 @@ class LocalConnection(connection.Connection):
     event = localharness_pb2.InputEvent(halt_request=True)
     await self._send_input_event(event)
 
+  async def _parse_and_process_ws_message(self, raw_msg: str | bytes) -> None:
+    """Parses a raw WebSocket frame and routes it to the event processor."""
+    event = localharness_pb2.OutputEvent()
+    json_format.Parse(raw_msg, event)
+    await self._processor.process_event(event)
+
   async def _ws_reader_loop(self) -> None:
     """Reads OutputEvents from the WebSocket and delegates to processor."""
     try:
       async for raw_msg in self._ws:
         logging.debug("RAW WS MSG: %s", raw_msg)
-        event = localharness_pb2.OutputEvent()
-        json_format.Parse(raw_msg, event)
-        await self._processor.process_event(event)
+        await self._parse_and_process_ws_message(raw_msg)
     except websockets.ConnectionClosed as e:
       close_code = _get_ws_close_code(e)
       if self._disconnecting:
@@ -703,6 +700,9 @@ class LocalConnection(connection.Connection):
       self, tool_call: localharness_pb2.ToolCall
   ) -> None:
     """Handles tool execution and hook interception."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_tool_call(tool_call)
 
   def _tool_result_to_dict(self, result: types.ToolResult) -> dict[str, Any]:
@@ -713,12 +713,18 @@ class LocalConnection(connection.Connection):
       self, step_update: localharness_pb2.StepUpdate
   ) -> None:
     """Handles question requests from the harness."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_question_request(step_update)
 
   async def _handle_tool_confirmation_request(
       self, step_update: localharness_pb2.StepUpdate
   ) -> None:
     """Handles tool confirmation requests from the harness."""
+    assert isinstance(
+        self._processor, event_processor.LocalHarnessEventProcessor
+    )
     await self._processor.handle_tool_confirmation_request(step_update)
 
 
@@ -834,6 +840,7 @@ def _to_mcp_server_proto(
         enabled_tools=server_cfg.enabled_tools or [],
         disabled_tools=server_cfg.disabled_tools or [],
         timeout_seconds=server_cfg.timeout_seconds or 0,
+        force_all_tools_eager=server_cfg.force_all_tools_eager,
         stdio=localharness_pb2.McpStdioTransport(
             command=server_cfg.command,
             args=server_cfg.args,
@@ -846,6 +853,7 @@ def _to_mcp_server_proto(
         enabled_tools=server_cfg.enabled_tools or [],
         disabled_tools=server_cfg.disabled_tools or [],
         timeout_seconds=server_cfg.timeout_seconds or 0,
+        force_all_tools_eager=server_cfg.force_all_tools_eager,
         http=localharness_pb2.McpHttpTransport(
             url=server_cfg.url,
             headers=server_cfg.headers or {},
@@ -912,6 +920,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       hook_runner: h_runner.HookRunner | None = None,
       models: list[types.ModelTarget] | None = None,
       skills_paths: list[str] | None = None,
+      inline_skills: Sequence[types.InlineSkill] | None = None,
       system_instructions: str | types.SystemInstructions | None = None,
       capabilities_config: types.CapabilitiesConfig | None = None,
       compaction_config: types.CompactionConfig | None = None,
@@ -936,6 +945,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
       hook_runner: Optional HookRunner for custom hooks.
       models: Optional list of model targets.
       skills_paths: Optional list of paths to search for skills.
+      inline_skills: Optional sequence of in-memory skill definitions.
       system_instructions: Optional SystemInstructions or string shorthand.
       capabilities_config: Optional CapabilitiesConfig to configure tools.
       compaction_config: Optional CompactionConfig to configure compaction.
@@ -961,6 +971,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     self._mcp_servers = mcp_servers or []
     self._models: list[types.ModelTarget] = models or []
     self._skills_paths = skills_paths
+    self._inline_skills = list(inline_skills) if inline_skills else []
     self._env = env
     self._debug_config = debug_config
     self._retry_config = retry_config
@@ -1001,10 +1012,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             enabled_tools=types.BuiltinTools.read_only()
         )
       else:
-        cfg = types.CapabilitiesConfig(
-            enabled_tools=types.BuiltinTools.read_only(),
-            enable_subagents=False,
-        )
+        cfg = types.CapabilitiesConfig()
     return connection.resolve_active_tools(cfg)
 
   def _to_system_instructions_proto(
@@ -1026,17 +1034,23 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
   ) -> localharness_pb2.HarnessSideTools:
     active_tools = self._resolve_active_tools(cfg, is_subagent=is_subagent)
     subagent_enabled = False
+    run_workflow_enabled = False
     max_depth = None
     allowed_subagents = []
 
-    if cfg is not None:
-      subagent_enabled = getattr(cfg, "enable_subagents", True) and (
+    if isinstance(cfg, types.CapabilitiesConfig):
+      subagent_enabled = cfg.enable_subagents and (
           types.BuiltinTools.START_SUBAGENT in active_tools
       )
-      max_depth = getattr(cfg, "max_subagent_depth", None)
+      run_workflow_enabled = cfg.enable_subagents and (
+          types.BuiltinTools.RUN_WORKFLOW in active_tools
+      )
+      max_depth = cfg.max_subagent_depth
       allowed_subagents = cfg.allowed_subagents or []
-    elif not is_subagent:
+    elif isinstance(cfg, types.SubagentCapabilities):
       subagent_enabled = types.BuiltinTools.START_SUBAGENT in active_tools
+      run_workflow_enabled = types.BuiltinTools.RUN_WORKFLOW in active_tools
+      allowed_subagents = cfg.allowed_subagents or []
 
     subagents_proto = localharness_pb2.SubagentsConfig(
         enabled=subagent_enabled,
@@ -1045,11 +1059,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     if max_depth is not None:
       subagents_proto.max_nesting_depth = max_depth
 
-    run_cmd_cfg = None
-    if cfg is not None:
-      run_cmd_cfg = getattr(cfg, "run_command_config", None) or getattr(
-          cfg, "run_command", None
-      )
+    run_cmd_cfg = getattr(cfg, "run_command_config", None) or getattr(
+        cfg, "run_command", None
+    )
     enable_daemon = (
         run_cmd_cfg.enable_daemons if run_cmd_cfg is not None else False
     )
@@ -1064,6 +1076,9 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
 
     return localharness_pb2.HarnessSideTools(
         subagents=subagents_proto,
+        run_workflow=localharness_pb2.RunWorkflowToolConfig(
+            enabled=run_workflow_enabled
+        ),
         find=localharness_pb2.FindToolConfig(
             enabled=types.BuiltinTools.FIND_FILE in active_tools
         ),
@@ -1111,6 +1126,54 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         ),
     )
 
+  def _to_subagent_skills_config_proto(
+      self,
+      skills_config: (
+          types.SubagentSkillsConfig
+          | types.SubagentInheritSkillsConfig
+          | types.SubagentNoneSkillsConfig
+          | types.SubagentOverrideSkillsConfig
+          | None
+      ),
+  ) -> localharness_pb2.SubagentSkillsConfig | None:
+    """Converts SubagentSkillsConfig model into localharness SubagentSkillsConfig proto."""
+    if skills_config is None:
+      return None
+    if isinstance(skills_config, types.SubagentInheritSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(inherit_config=skills_config)
+    elif isinstance(skills_config, types.SubagentNoneSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(none_config=skills_config)
+    elif isinstance(skills_config, types.SubagentOverrideSkillsConfig):
+      skills_config = types.SubagentSkillsConfig(override_config=skills_config)
+    res = localharness_pb2.SubagentSkillsConfig()
+    if skills_config.none_config is not None:
+      res.none_config.SetInParent()
+    elif skills_config.inherit_config is not None:
+      res.inherit_config.SetInParent()
+      if skills_config.inherit_config.skill_names:
+        res.inherit_config.skill_names.extend(
+            skills_config.inherit_config.skill_names
+        )
+      if skills_config.inherit_config.extra_skills_paths:
+        res.inherit_config.extra_skills_paths.extend(
+            skills_config.inherit_config.extra_skills_paths
+        )
+    elif skills_config.override_config is not None:
+      res.override_config.SetInParent()
+      if skills_config.override_config.skills_paths:
+        res.override_config.skills_paths.extend(
+            skills_config.override_config.skills_paths
+        )
+      if skills_config.override_config.inline_skills:
+        raise ValueError(
+            "inline_skills in SubagentOverrideSkillsConfig is not supported"
+            " by LocalConnectionStrategy; use AntigravityProdActorAgentConfig or"
+            " skills_paths instead."
+        )
+    else:
+      return None
+    return res
+
   def _build_custom_subagents_protos(
       self,
       all_tool_protos: dict[str, localharness_pb2.Tool],
@@ -1118,9 +1181,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     """Resolves and builds CustomAgent configuration protos for subagents."""
     custom_agents_protos = []
     for subagent in self._subagents:
-      capabilities = subagent.capabilities or types.SubagentCapabilities(
-          enabled_tools=types.BuiltinTools.read_only(),
-      )
+      capabilities = subagent.capabilities
 
       resolved_subagent_tools = []
       for tool in subagent.tools or []:
@@ -1139,31 +1200,40 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
               f"Invalid tool type in subagent '{subagent.name}' tools list:"
               f" {tool}"
           )
-
-      model_proto = None
+      agent_behavior = (
+          capabilities.agent_behavior
+          if capabilities is not None
+          else types.AgentBehavior.AUTONOMOUS
+      )
+      custom_agent_pb = localharness_pb2.CustomAgent(
+          name=subagent.name,
+          description=subagent.description,
+          system_instructions=self._to_subagent_system_instructions_proto(
+              subagent.system_instructions
+          ),
+          harness_side_tools=self._to_harness_side_tools_proto(
+              capabilities, is_subagent=True
+          ),
+          tools=resolved_subagent_tools,
+          agent_behavior=to_proto_agent_behavior(agent_behavior),
+      )
       if subagent.model is not None:
         # Subagents pin a model name only; they always run against the
         # agent-level endpoint. See localharness/subagent.go.
-        model_proto = localharness_pb2.ModelConfig(name=subagent.model)
-
-      custom_agents_protos.append(
-          localharness_pb2.CustomAgent(
-              name=subagent.name,
-              description=subagent.description,
-              system_instructions=self._to_subagent_system_instructions_proto(
-                  subagent.system_instructions
-              ),
-              harness_side_tools=self._to_harness_side_tools_proto(
-                  capabilities, is_subagent=True
-              ),
-              tools=resolved_subagent_tools,
-              agent_behavior=to_proto_agent_behavior(
-                  capabilities.agent_behavior
-              ),
-              model=model_proto,
-          )
+        custom_agent_pb.model.name = subagent.model
+      skills_proto = self._to_subagent_skills_config_proto(
+          subagent.skills_config
       )
+      if skills_proto is not None:
+        custom_agent_pb.skills_config.CopyFrom(skills_proto)
+      custom_agents_protos.append(custom_agent_pb)
     return custom_agents_protos
+
+  def _default_app_data_dir(self) -> str:
+    """Returns the configured app_data_dir or the default local harness directory."""
+    return self._app_data_dir or str(
+        (pathlib.Path("~") / ".gemini" / "antigravity").expanduser().resolve()
+    )
 
   def _build_harness_config(self) -> localharness_pb2.HarnessConfig:
     """Translates Pydantic config objects into a HarnessConfig proto."""
@@ -1234,6 +1304,13 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         self._compaction_config, self._capabilities_config
     )
 
+    if self._inline_skills and self._skills_paths:
+      raise ValueError(
+          "combining inline_skills and skills_paths is not supported by"
+          " LocalHarness; provide either inline_skills or skills_paths, not"
+          " both."
+      )
+
     custom_agents_protos = self._build_custom_subagents_protos(all_tool_protos)
     harness_config = localharness_pb2.HarnessConfig(
         tools=root_tool_protos,
@@ -1251,12 +1328,7 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         finish_tool_schema_json=(
             self._capabilities_config.finish_tool_schema_json or ""
         ),
-        app_data_dir=self._app_data_dir
-        or str(
-            (pathlib.Path("~") / ".gemini" / "antigravity")
-            .expanduser()
-            .resolve()
-        ),
+        app_data_dir=self._default_app_data_dir(),
         mcp_servers=mcp_server_protos,
         enabled_hooks=enabled_hooks,
         custom_subagents=custom_agents_protos,
@@ -1264,6 +1336,25 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
             self._capabilities_config.agent_behavior
         ),
     )
+    if self._inline_skills:
+      harness_config.skills_config.enabled = True
+      for s in self._inline_skills:
+        entry = harness_config.skills_config.skills.add()
+        entry.skill.name = s.name
+        entry.skill.description = s.description
+        entry.skill.content = s.content
+        if s.allowed_tools:
+          entry.skill.allowed_tools.extend(s.allowed_tools)
+        # genai.skills.Skill carries dependencies in its metadata map, which
+        # InMemoryProvider.GetDependencies parses via ParseListMetadata.
+        metadata = dict(s.metadata)
+        if s.dependent_tools and "dependent_tools" not in metadata:
+          metadata["dependent_tools"] = json.dumps(list(s.dependent_tools))
+        if s.dependent_skills and "dependent_skills" not in metadata:
+          metadata["dependent_skills"] = json.dumps(list(s.dependent_skills))
+        if metadata:
+          entry.skill.metadata.update(metadata)
+
     if self._retry_config:
       retry_proto = build_retry_config_proto(self._retry_config)
       if retry_proto:
@@ -1394,11 +1485,10 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         f" {_MAX_WEBSOCKET_CONNECT_RETRIES} attempts. Stderr: {stderr}"
     ) from last_exception
 
-  async def __aenter__(self) -> None:
-    """Starts the backend."""
-    self._validate_connection()
-
-    harness_config = self._build_harness_config()
+  async def _spawn_harness_and_connect_ws(
+      self, *, use_interactions_api: bool = False
+  ) -> tuple[subprocess.Popen[bytes], Any, str]:
+    """Spawns the localharness process, exchanges stdio config, and connects WS."""
     sdk_version = _get_sdk_version()
     client_info_proto = localharness_pb2.ClientInfo(
         language="python",
@@ -1415,6 +1505,8 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
         client_info=client_info_proto,
         env=env_map,
     )
+    if use_interactions_api:
+      input_config.use_interactions_api = True
 
     merged_env = {**os.environ, **env_map} if self._env is not None else None
 
@@ -1449,6 +1541,15 @@ class LocalConnectionStrategy(connection.ConnectionStrategy):
     ws, ws_url = await self._connect_websocket(
         output_config.port, output_config.api_key, process
     )
+    return process, ws, ws_url
+
+  async def __aenter__(self) -> None:
+    """Starts the backend."""
+    self._validate_connection()
+
+    harness_config = self._build_harness_config()
+    process, ws, ws_url = await self._spawn_harness_and_connect_ws()
+    assert process.stderr is not None
 
     try:
       init_event = localharness_pb2.InitializeConversationEvent(

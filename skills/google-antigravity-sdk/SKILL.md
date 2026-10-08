@@ -103,6 +103,10 @@ relevant information.
     to spawn and orchestrate subagents, or configure multi-tier nested subagent
     hierarchies (using `max_subagent_depth` and `allowed_subagents`), read
     `examples/getting_started/subagents.md`.
+-   If the user needs to author and execute deterministic multi-agent workflows
+    using `@beta.workflows.define` (`phase`, `log`, `agent`, `parallel`,
+    `pipeline`) and `await agent.beta.run_workflow(...)`, read
+    `examples/getting_started/workflows.md`.
 -   If the user needs to connect an agent to external services via MCP (Stdio or
     SSE), read `examples/getting_started/mcp_tools.md`.
 -   If the user needs to create proactive agents that respond to time-based

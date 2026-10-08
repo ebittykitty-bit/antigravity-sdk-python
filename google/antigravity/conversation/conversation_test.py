@@ -455,6 +455,32 @@ class ConversationReceiveChunksTest(unittest.IsolatedAsyncioTestCase):
     tool_calls = [c for c in chunks if isinstance(c, types.ToolCall)]
     self.assertEqual(len(tool_calls), 2)
 
+  async def test_receive_chunks_never_deduplicates_empty_string_id_calls(
+      self,
+  ) -> None:
+    """Verifies that tool calls with id='' (empty string) are always yielded."""
+    tc1 = types.ToolCall(id="", name="tool_x", args={"a": 1})
+    tc2 = types.ToolCall(id="", name="tool_x", args={"a": 2})
+
+    s1 = _make_step("", step_index=1, step_type=types.StepType.TOOL_CALL)
+    s1.tool_calls = [tc1]
+    s2 = _make_step("", step_index=2, step_type=types.StepType.TOOL_CALL)
+    s2.tool_calls = [tc2]
+
+    mock_connection = mock.MagicMock(spec=connection.Connection)
+
+    async def mock_generator():
+      yield s1
+      yield s2
+
+    mock_connection.receive_steps.return_value = mock_generator()
+    conv = conversation.Conversation(mock_connection)
+
+    chunks = [chunk async for chunk in conv.receive_chunks()]
+
+    tool_calls = [c for c in chunks if isinstance(c, types.ToolCall)]
+    self.assertEqual(len(tool_calls), 2)
+
 
 class ConversationHistoryTest(unittest.IsolatedAsyncioTestCase):
   """Validates history accessors across multiple turns."""

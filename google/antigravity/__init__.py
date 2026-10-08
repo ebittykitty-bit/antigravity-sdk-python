@@ -14,6 +14,7 @@
 
 """Google Antigravity SDK for building AI agents."""
 
+from google.antigravity import beta
 from google.antigravity.agent import Agent
 from google.antigravity.connections.connection import AgentConfig
 from google.antigravity.connections.local.litert_connection_config import LiteRTAgentConfig
@@ -34,6 +35,7 @@ from google.antigravity.types import from_file
 from google.antigravity.types import GeminiAPIEndpoint
 from google.antigravity.types import GeminiModelOptions
 from google.antigravity.types import Image
+from google.antigravity.types import InlineSkill
 from google.antigravity.types import ModelAPIRetryConfig
 from google.antigravity.types import ModelEndpoint
 from google.antigravity.types import ModelOutputRetryConfig
@@ -71,6 +73,7 @@ __all__ = [
     "GeminiAPIEndpoint",
     "GeminiModelOptions",
     "Image",
+    "InlineSkill",
     "ModelAPIRetryConfig",
     "ModelEndpoint",
     "ModelOutputRetryConfig",
@@ -88,6 +91,7 @@ __all__ = [
     "VertexEndpoint",
     "Video",
     "ToolExecutionError",
+    "beta",
     "from_bytes",
     "from_file",
 ]

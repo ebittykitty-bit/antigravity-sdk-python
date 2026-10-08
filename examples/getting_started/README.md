@@ -69,6 +69,7 @@ Extending agent capabilities and orchestrating multi-agent workflows.
 * [agent_skills.py](agent_skills.py): Discovering and loading domain-specific skills from the filesystem (`SKILL.md`).
 * [mcp_tools.py](mcp_tools.py): Connecting to external toolsets via the Model Context Protocol (MCP).
 * [subagents.py](subagents.py): Spawning and delegating specialized tasks to sub-agents.
+* [workflows.py](workflows.py): Authoring and executing deterministic multi-agent workflows with `@beta.workflows.define` (`phase`, `log`, `agent`, `parallel`, `pipeline`) and `agent.beta.run_workflow()`.
 * [web_tools.py](web_tools.py): Enabling and utilizing built-in web search and URL content fetching tools.
 
 ### ⚙️ Lifecycle, Proactivity, & Observability

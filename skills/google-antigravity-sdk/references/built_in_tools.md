@@ -41,6 +41,8 @@ descriptions.
 :                               :                    : command.               :
 | `BuiltinTools.ASK_QUESTION`   | `ask_question`     | Ask user a question.   |
 | `BuiltinTools.START_SUBAGENT` | `start_subagent`   | Invoke a subagent.     |
+| `BuiltinTools.RUN_WORKFLOW`   | `run_workflow`     | Execute a multi-agent  |
+:                               :                    : workflow script.       :
 | `BuiltinTools.GENERATE_IMAGE` | `generate_image`   | Generate or edit       |
 :                               :                    : images.                :
 | `BuiltinTools.SEARCH_WEB`     | `search_web`       | Search the web for     |

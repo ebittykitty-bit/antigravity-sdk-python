@@ -18,18 +18,25 @@ package genai;
 
 import "google/antigravity/proto/agents.proto";
 import "google/antigravity/proto/content.proto";
+import "google/antigravity/proto/elicitation.proto";
 import "google/antigravity/proto/environment.proto";
 import "google/antigravity/proto/hooks.proto";
 import "google/antigravity/proto/interaction.proto";
 import "google/antigravity/proto/models.proto";
 import "google/antigravity/proto/sse_events.proto";
 import "google/antigravity/proto/state_update.proto";
-import "google/antigravity/proto/steps.proto";
 import "google/antigravity/proto/tools.proto";
 import "google/antigravity/proto/genai_json_annotations.proto";
 
 option features = { field_presence : IMPLICIT enum_type : OPEN utf8_validation : NONE };
 
+enum InputDeliveryMode {
+  INPUT_DELIVERY_MODE_UNSPECIFIED = 0;
+  QUEUE = 1;
+  IMMEDIATE = 2;
+  SILENT = 3;
+  BLOCKING = 4;
+}
 message ClientEventBatch {
   oneof connect_request {
     .genai.CreateInteractionEvent create_interaction = 7;
@@ -65,6 +72,21 @@ message FunctionInvocation {
   string call_id = 1;
   string name = 2;
   .genai.Struct arguments = 3;
+}
+message FunctionResultEvent {
+  string call_id = 1;
+  string name = 2;
+  bool is_error = 3;
+  .genai.Value result = 4;
+}
+message ElicitationResultEvent {
+  oneof result {
+    .genai.ContentList user_input = 2;
+    .genai.UserTimeout user_timeout = 3;
+    .genai.ConfirmationResponse confirmation = 4;
+    .genai.MultipleChoiceResponse multiple_choice = 5;
+  }
+  string elicitation_id = 1;
 }
 message SkillDeclaration {
   string name = 1;
@@ -142,18 +164,32 @@ message Payload {
   oneof event_type {
     option (gaos.parsing.subtype_source) = true;
 
-    .genai.Step step = 11;
     .genai.StepStart step_start = 1
         [(gaos.parsing.json_discriminator_value) = "step.start"];
     .genai.StepDelta step_delta = 2
         [(gaos.parsing.json_discriminator_value) = "step.delta"];
     .genai.StepStop step_stop = 3
         [(gaos.parsing.json_discriminator_value) = "step.stop"];
+    .genai.InputEvent input = 207
+        [(gaos.parsing.json_discriminator_value) = "input"];
     .genai.StateUpdate state_update = 13;
+    .genai.Interaction.Usage usage_update = 30;
     .genai.FunctionInvocation function_invocation = 14;
     .genai.CallHookRequest call_hook_request = 15;
     .genai.CapabilitiesUpdate capabilities_update = 17;
     .genai.CallHookResponse call_hook_response = 16;
+    .genai.FunctionResultEvent function_result = 18
+        [(gaos.parsing.json_discriminator_value) = "function_result"];
+    .genai.ElicitationResultEvent elicitation_result = 19
+        [(gaos.parsing.json_discriminator_value) = "elicitation_result"];
   }
   string sub_interaction_id = 6;
+}
+message InputEvent {
+  message SlashCommand {
+    string name = 1;
+  }
+  repeated .genai.Content content = 1;
+  .genai.InputEvent.SlashCommand slash_command = 5;
+  .genai.InputDeliveryMode mode = 3;
 }

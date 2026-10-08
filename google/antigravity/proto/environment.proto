@@ -36,13 +36,15 @@ message EnvironmentConfig {
     string domain = 1;
     map<string, string> transform = 2 [(gaos.parsing.flexible_map) = true];
     string credential = 3;
+    .genai.EnvironmentConfig.NetworkMode mode = 4;
   }
   message EnvVar {
     string value = 1;
     string credential = 2;
   }
   message EnvironmentNetworkEgressAllowlist {
-    repeated .genai.EnvironmentConfig.EgressRule allowlist = 1;
+    repeated .genai.EnvironmentConfig.EgressRule allowlist = 1
+        [(gaos.parsing.add_union_value) = "allowlist.mode"];
   }
   enum NetworkMode {
     NETWORK_MODE_UNSPECIFIED = 0;

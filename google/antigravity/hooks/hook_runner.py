@@ -14,6 +14,7 @@
 
 """Manages registration and execution of Antigravity SDK hooks."""
 
+from collections.abc import Sequence
 import logging
 from typing import Any
 
@@ -45,6 +46,8 @@ class HookRunner:
 
   def __init__(
       self,
+      hooks: Sequence[Any] | None = None,
+      *,
       on_session_start_hooks: list[hooks_base.OnSessionStartHook] | None = None,
       on_session_end_hooks: list[hooks_base.OnSessionEndHook] | None = None,
       pre_turn_hooks: list[hooks_base.PreTurnHook] | None = None,
@@ -74,6 +77,10 @@ class HookRunner:
     self._post_step_hooks_list = _post_step_hooks or []
 
     self.session_context = hooks_base.SessionContext()
+
+    if hooks:
+      for hook in hooks:
+        self.register_hook(hook)
 
   @property
   def has_hooks(self) -> bool:
@@ -143,7 +150,7 @@ class HookRunner:
   def _post_step_hooks(self) -> tuple[hooks_base._PostStepHook, ...]:
     return tuple(self._post_step_hooks_list)
 
-  def register_hook(self, hook: Any):
+  def register_hook(self, hook: Any) -> None:
     """Registers a hook by inferring its type.
 
     Args:

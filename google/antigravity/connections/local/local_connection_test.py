@@ -18,17 +18,14 @@ import asyncio
 import base64
 import datetime
 import enum
-import http.server
 import importlib
 import io
 import json
 import os
 import pathlib
-import socketserver
 import struct
 import subprocess
 import tempfile
-import threading
 import typing
 from typing import Any, Literal, Union
 import unittest
@@ -2297,6 +2294,91 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     strategy = self._make_strategy(skills_paths=["/skills/a", "/skills/b"])
     config = strategy._build_harness_config()
     self.assertEqual(list(config.skills_paths), ["/skills/a", "/skills/b"])
+    self.assertFalse(config.HasField("skills_config"))
+
+  def test_inline_skills_to_proto(self):
+    """Verifies inline_skills translate into HarnessConfig.skills_config."""
+    inline_skills = [
+        types.InlineSkill(
+            name="skill-one",
+            description="First inline skill.",
+            content="# Skill One",
+            allowed_tools=["view_file"],
+            dependent_tools=["custom_tool_a", "custom_tool_b"],
+            dependent_skills=["skill-two"],
+            metadata={"visibility": "hidden"},
+        ),
+        types.InlineSkill(
+            name="skill-two",
+            description="Second inline skill.",
+            content="# Skill Two",
+            dependent_tools=["ignored_tool"],
+            metadata={"dependent_tools": "explicit_tool"},
+        ),
+    ]
+    strategy = self._make_strategy(inline_skills=inline_skills)
+    config = strategy._build_harness_config()
+    self.assertTrue(config.HasField("skills_config"))
+    self.assertTrue(config.skills_config.enabled)
+    self.assertLen(config.skills_config.skills, 2)
+
+    first = config.skills_config.skills[0]
+    self.assertEqual(first.WhichOneof("source"), "skill")
+    self.assertEqual(first.skill.name, "skill-one")
+    self.assertEqual(first.skill.description, "First inline skill.")
+    self.assertEqual(first.skill.content, "# Skill One")
+    self.assertEqual(list(first.skill.allowed_tools), ["view_file"])
+    self.assertEqual(
+        dict(first.skill.metadata),
+        {
+            "visibility": "hidden",
+            "dependent_tools": '["custom_tool_a", "custom_tool_b"]',
+            "dependent_skills": '["skill-two"]',
+        },
+    )
+
+    second = config.skills_config.skills[1]
+    self.assertEqual(second.skill.name, "skill-two")
+    self.assertEqual(
+        dict(second.skill.metadata),
+        {"dependent_tools": "explicit_tool"},
+    )
+
+  def test_combining_inline_skills_and_skills_paths_raises(self):
+    """Verifies combining inline_skills and skills_paths raises ValueError."""
+    skill = types.InlineSkill(name="s1", description="desc", content="# body")
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      local_connection_config.LocalAgentConfig(
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      litert_connection_config.LiteRTAgentConfig(
+          model_path="/tmp/model.litertlm",
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      local_openai_connection_config.LocalOpenAIAgentConfig(
+          model="llama3",
+          base_url="http://localhost:11434/v1",
+          skills_paths=["/skills/a"],
+          inline_skills=[skill],
+      )
+    strategy = self._make_strategy(
+        skills_paths=["/skills/a"],
+        inline_skills=[skill],
+    )
+    with self.assertRaisesRegex(
+        ValueError, "combining inline_skills and skills_paths"
+    ):
+      strategy._build_harness_config()
 
   def test_capabilities_config_disabled_tools(self):
     """Verifies that disabling tools produces the correct proto.
@@ -2367,6 +2449,7 @@ class LocalConnectionStrategyConfigTest(parameterized.TestCase):
     expected_harness_side_tools = localharness_pb2.HarnessSideTools(
         view_file=localharness_pb2.ViewFileToolConfig(enabled=True),
         subagents=localharness_pb2.SubagentsConfig(enabled=False),
+        run_workflow=localharness_pb2.RunWorkflowToolConfig(enabled=False),
         user_questions=localharness_pb2.UserQuestionsConfig(enabled=False),
         run_command=localharness_pb2.RunCommandToolConfig(
             enabled=False,
@@ -3888,8 +3971,41 @@ class LocalConnectionStrategyConnectTest(unittest.IsolatedAsyncioTestCase):
         ),
     ])
 
+  @mock.patch("websockets.connect", new_callable=mock.AsyncMock)
+  @mock.patch("subprocess.Popen")
+  async def test_spawn_harness_sets_use_interactions_api(
+      self, mock_popen, mock_connect
+  ):
+    """Verifies _spawn_harness_and_connect_ws sets use_interactions_api on InputConfig."""
+    output_config = localharness_pb2.OutputConfig(port=8080, api_key="fake-key")
+    serialized = output_config.SerializeToString()
+    length_bytes = struct.pack("<I", len(serialized))
 
-_get_default_binary_path = local_connection._get_default_binary_path
+    mock_proc = mock.MagicMock()
+    mock_proc.stdin = mock.MagicMock()
+    mock_proc.stdout = mock.MagicMock()
+    mock_proc.stderr = io.BytesIO(b"")
+    mock_proc.stdout.read.side_effect = [length_bytes, serialized]
+    mock_popen.return_value = mock_proc
+
+    mock_ws = mock.MagicMock()
+    mock_connect.return_value = mock_ws
+
+    strategy = self._make_strategy()
+    process, ws, ws_url = await strategy._spawn_harness_and_connect_ws(
+        use_interactions_api=True
+    )
+    self.assertIs(process, mock_proc)
+    self.assertIs(ws, mock_ws)
+    self.assertEqual(ws_url, "ws://localhost:8080/")
+
+    written_bytes = mock_proc.stdin.write.call_args[0][0]
+    parsed_config = localharness_pb2.InputConfig()
+    parsed_config.ParseFromString(written_bytes[4:])
+    self.assertTrue(parsed_config.use_interactions_api)
+
+
+_get_default_binary_path = local_connection._get_default_binary_path_external
 
 
 class GetDefaultBinaryPathTest(unittest.TestCase):
@@ -4296,6 +4412,7 @@ class LocalConnectionCompactionHookTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
+    test_utils.patch_default_binary_path(self)
     self.mock_process = mock.MagicMock()
 
   async def test_compaction_step_dispatches_hook(self):
@@ -4367,6 +4484,7 @@ class LocalConnectionStopHookTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
+    test_utils.patch_default_binary_path(self)
     self.mock_process = mock.MagicMock()
 
   def test_get_enabled_hooks_includes_stop(self):
@@ -4888,6 +5006,23 @@ class LocalConnectionDisconnectTest(unittest.IsolatedAsyncioTestCase):
 
     await harness.disconnect_sdk()
     self.assertEqual(call_order, ["ws_close", "stdin_close"])
+
+  async def test_disconnect_raises_on_nonzero_exit_code(self):
+    """Verifies AntigravityExecutionError is raised if harness exits non-zero."""
+    self.mock_process.poll.return_value = 1
+    self.mock_process.returncode = 1
+    harness = test_utils.TestLocalHarness(
+        test_case=self,
+        process=self.mock_process,
+    )
+    harness.conn._stderr_lines.append(
+        "XBOX_SANDBOX_FATAL_ERROR: snapshot creation failed"
+    )
+    with self.assertRaisesRegex(
+        types.AntigravityExecutionError,
+        r"(?s)Harness process exited with code 1.*XBOX_SANDBOX_FATAL_ERROR",
+    ):
+      await harness.disconnect_sdk()
 
 
 class LocalConnectionUnexpectedCloseTest(unittest.IsolatedAsyncioTestCase):
@@ -5602,6 +5737,7 @@ class LocalAgentConfigTest(absltest.TestCase):
         args=["math"],
         env={"FOO": "bar"},
         enabled_tools=["add", "sub"],
+        force_all_tools_eager=True,
     )
     sse_cfg = types.McpStreamableHttpServer(
         name="my-sse",
@@ -5632,12 +5768,14 @@ class LocalAgentConfigTest(absltest.TestCase):
     stdio_pb = harness_pb.mcp_servers[0]
     self.assertEqual(stdio_pb.name, "my-stdio")
     self.assertEqual(stdio_pb.enabled_tools, ["add", "sub"])
+    self.assertTrue(stdio_pb.force_all_tools_eager)
     self.assertEqual(stdio_pb.stdio.command, "npx")
     self.assertEqual(stdio_pb.stdio.args, ["math"])
     self.assertEqual(dict(stdio_pb.stdio.env), {"FOO": "bar"})
 
     sse_pb = harness_pb.mcp_servers[1]
     self.assertEqual(sse_pb.name, "my-sse")
+    self.assertFalse(sse_pb.force_all_tools_eager)
     self.assertEqual(sse_pb.http.url, "https://sse.example.com")
 
 
@@ -6264,203 +6402,205 @@ class LocalConnectionSubagentsTest(unittest.IsolatedAsyncioTestCase):
     self.assertIsInstance(config.capabilities, types.CapabilitiesConfig)
     self.assertIsNone(config.conversation_id)
 
+  def test_subagent_skills_config_translation(self):
+    subagents = [
+        types.SubagentConfig(
+            name="none_sub",
+            description="No skills",
+            skills_config=types.SubagentNoneSkillsConfig(),
+        ),
+        types.SubagentConfig(
+            name="inherit_sub",
+            description="Scoped inherit",
+            skills_config=types.SubagentInheritSkillsConfig(
+                skill_names=["format_ghidra"],
+                extra_skills_paths=["/tmp/extra"],
+            ),
+        ),
+        types.SubagentConfig(
+            name="empty_inherit_sub",
+            description="Unfiltered inherit",
+            skills_config=types.SubagentInheritSkillsConfig(),
+        ),
+        types.SubagentConfig(
+            name="override_sub",
+            description="Override skills",
+            skills_config=types.SubagentOverrideSkillsConfig(
+                skills_paths=["/custom/skills"],
+            ),
+        ),
+        types.SubagentConfig(
+            name="default_sub",
+            description="Default skills (None)",
+            skills_config=None,
+        ),
+        types.SubagentConfig(
+            name="empty_cfg_sub",
+            description="Default skills (empty SubagentSkillsConfig)",
+            skills_config=types.SubagentSkillsConfig(),
+        ),
+    ]
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=subagents,
+        workspaces=[str(self.workspace)],
+    )
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 6)
 
-class _EvalProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-  daemon_threads = True
+    none_sub = harness_config.custom_subagents[0]
+    self.assertEqual(none_sub.skills_config.WhichOneof("mode"), "none_config")
 
-  def __init__(self, server_address, handler_class, workspace_dir: str):
-    super().__init__(server_address, handler_class)
-    self.workspace_dir = workspace_dir
-    self.captured_requests: list[dict[str, Any]] = []
-    self.attempt_counter = 0
-    self.lock = threading.Lock()
+    inherit_sub = harness_config.custom_subagents[1]
+    self.assertEqual(
+        inherit_sub.skills_config.WhichOneof("mode"), "inherit_config"
+    )
+    self.assertEqual(
+        list(inherit_sub.skills_config.inherit_config.skill_names),
+        ["format_ghidra"],
+    )
+    self.assertEqual(
+        list(inherit_sub.skills_config.inherit_config.extra_skills_paths),
+        ["/tmp/extra"],
+    )
 
+    empty_inherit_sub = harness_config.custom_subagents[2]
+    self.assertTrue(empty_inherit_sub.skills_config.HasField("inherit_config"))
+    self.assertEqual(
+        empty_inherit_sub.skills_config.WhichOneof("mode"), "inherit_config"
+    )
 
-class _EvalProxyHandler(http.server.BaseHTTPRequestHandler):
+    override_sub = harness_config.custom_subagents[3]
+    self.assertEqual(
+        override_sub.skills_config.WhichOneof("mode"), "override_config"
+    )
+    self.assertEqual(
+        list(override_sub.skills_config.override_config.skills_paths),
+        ["/custom/skills"],
+    )
 
-  def log_message(self, format_str, *args):
-    pass
+    default_sub = harness_config.custom_subagents[4]
+    self.assertFalse(default_sub.HasField("skills_config"))
 
-  def do_POST(self):  # pylint: disable=invalid-name
-    length = int(self.headers.get("Content-Length", 0))
-    raw_body = self.rfile.read(length)
-    req_json = json.loads(raw_body.decode("utf-8"))
+    empty_cfg_sub = harness_config.custom_subagents[5]
+    self.assertFalse(empty_cfg_sub.HasField("skills_config"))
 
-    with self.server.lock:
-      self.server.attempt_counter += 1
-      attempt = self.server.attempt_counter
-      self.server.captured_requests.append({
-          "path": self.path,
-          "attempt": attempt,
-          "json": req_json,
-      })
+    direct_none = strategy._to_subagent_skills_config_proto(
+        types.SubagentNoneSkillsConfig()
+    )
+    self.assertIsNotNone(direct_none)
+    self.assertEqual(direct_none.WhichOneof("mode"), "none_config")
 
-    # Attempt 1: Return transient HTTP 503 to verify RetryConfig.benchmark()
-    if attempt == 1:
-      err_payload = json.dumps({
-          "error": {
-              "code": 503,
-              "message": "Simulated transient 503 for eval retry test",
-              "status": "UNAVAILABLE",
-          }
-      }).encode("utf-8")
-      self.send_response(503)
-      self.send_header("Content-Type", "application/json")
-      self.send_header("Content-Length", str(len(err_payload)))
-      self.end_headers()
-      self.wfile.write(err_payload)
-      return
+    direct_inherit = strategy._to_subagent_skills_config_proto(
+        types.SubagentInheritSkillsConfig(skill_names=["direct_skill"])
+    )
+    self.assertIsNotNone(direct_inherit)
+    self.assertEqual(direct_inherit.WhichOneof("mode"), "inherit_config")
+    self.assertEqual(
+        list(direct_inherit.inherit_config.skill_names), ["direct_skill"]
+    )
 
-    # Check if contents already includes a functionResponse from run_command
-    has_fn_response = False
-    for content in req_json.get("contents", []):
-      for part in content.get("parts", []):
-        if "functionResponse" in part:
-          has_fn_response = True
+    direct_override = strategy._to_subagent_skills_config_proto(
+        types.SubagentOverrideSkillsConfig(skills_paths=["/direct/path"])
+    )
+    self.assertIsNotNone(direct_override)
+    self.assertEqual(direct_override.WhichOneof("mode"), "override_config")
+    self.assertEqual(
+        list(direct_override.override_config.skills_paths), ["/direct/path"]
+    )
 
-    if not has_fn_response:
-      # Attempt 2: Return a functionCall to run_command to verify allow_all()
-      candidate_part = {
-          "functionCall": {
-              "name": "run_command",
-              "args": {
-                  "CommandLine": "echo E2E_EVAL_TEST_OK",
-                  "Cwd": self.server.workspace_dir,
-                  "WaitMsBeforeAsync": 5000,
-                  "toolAction": "Running echo",
-                  "toolSummary": "Run echo",
-              },
-          }
-      }
-    else:
-      # Attempt 3: Return final model text after run_command succeeded
-      candidate_part = {"text": "Verified output: E2E_EVAL_TEST_OK"}
+    override_no_paths = types.SubagentOverrideSkillsConfig.model_construct(
+        skills_paths=[], inline_skills=[]
+    )
+    direct_override_no_paths = strategy._to_subagent_skills_config_proto(
+        types.SubagentSkillsConfig.model_construct(
+            override_config=override_no_paths
+        )
+    )
+    self.assertIsNotNone(direct_override_no_paths)
+    self.assertTrue(direct_override_no_paths.HasField("override_config"))
+    self.assertEqual(
+        direct_override_no_paths.WhichOneof("mode"), "override_config"
+    )
 
-    resp_obj = {
-        "candidates": [{
-            "content": {"role": "model", "parts": [candidate_part]},
-            "finishReason": "STOP",
-        }]
-    }
-    if "alt=sse" in self.path:
-      body = f"data: {json.dumps(resp_obj)}\r\n\r\n".encode("utf-8")
-      content_type = "text/event-stream"
-    else:
-      body = json.dumps(resp_obj).encode("utf-8")
-      content_type = "application/json"
+  def test_subagent_skills_config_inline_skills_unsupported(self):
+    subagent = types.SubagentConfig(
+        name="inline_sub",
+        description="Inline override",
+        skills_config=types.SubagentOverrideSkillsConfig(
+            inline_skills=[
+                types.InlineSkill(
+                    name="re_skill",
+                    description="RE skill",
+                    content="# RE instructions",
+                )
+            ],
+        ),
+    )
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+    with self.assertRaisesRegex(
+        ValueError,
+        "inline_skills in SubagentOverrideSkillsConfig is not supported",
+    ):
+      strategy._build_harness_config()
 
-    self.send_response(200)
-    self.send_header("Content-Type", content_type)
-    self.send_header("Content-Length", str(len(body)))
-    self.end_headers()
-    self.wfile.write(body)
+  def test_subagent_default_capabilities_read_only_tools(self):
+    """Verifies subagents with capabilities=None default to read-only tools."""
+    subagent = types.SubagentConfig(
+        name="readonly_sub",
+        description="A subagent with default capabilities",
+    )
+    strategy = local_connection.LocalConnectionStrategy(
+        subagents=[subagent],
+        workspaces=[str(self.workspace)],
+    )
+    harness_config = strategy._build_harness_config()
+    self.assertEqual(len(harness_config.custom_subagents), 1)
+    custom_agent = harness_config.custom_subagents[0]
+    self.assertTrue(custom_agent.harness_side_tools.view_file.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.list_dir.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.find.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.file_edit.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.write_to_file.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.run_command.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.user_questions.enabled)
+    self.assertFalse(custom_agent.harness_side_tools.subagents.enabled)
+
+  def test_resolve_active_tools_and_harness_side_tools_none_cfg(self):
+    strategy = local_connection.LocalConnectionStrategy(
+        workspaces=[str(self.workspace)],
+    )
+    # Top-level default (CapabilitiesConfig)
+    tools = strategy._resolve_active_tools(None, is_subagent=False)
+    self.assertEqual(
+        tools,
+        local_connection.connection.resolve_active_tools(
+            types.CapabilitiesConfig()
+        ),
+    )
+    harness_tools = strategy._to_harness_side_tools_proto(
+        None, is_subagent=False
+    )
+    self.assertTrue(harness_tools.run_command.enabled)
+
+    # Subagent default (SubagentCapabilities read-only)
+    sub_tools = strategy._resolve_active_tools(None, is_subagent=True)
+    self.assertEqual(sub_tools, set(types.BuiltinTools.read_only()))
+    sub_harness_tools = strategy._to_harness_side_tools_proto(
+        None, is_subagent=True
+    )
+    self.assertTrue(sub_harness_tools.view_file.enabled)
+    self.assertFalse(sub_harness_tools.run_command.enabled)
 
 
 class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
-  """End-to-end verification of LocalAgentConfig.eval() with localharness."""
+  """Verification of LocalAgentConfig.eval() configuration."""
 
-  async def test_eval_e2e_http_payload_policy_and_retry(self):
-    try:
-      local_connection._get_default_binary_path(None)
-    except RuntimeError:
-      self.skipTest("localharness binary not available in this environment")
-
-    with tempfile.TemporaryDirectory() as workspace_dir:
-      server = _EvalProxyServer(
-          ("127.0.0.1", 0), _EvalProxyHandler, workspace_dir
-      )
-      self.addCleanup(server.shutdown)
-      self.addCleanup(server.server_close)
-      thread = threading.Thread(target=server.serve_forever, daemon=True)
-      thread.start()
-      proxy_url = f"http://127.0.0.1:{server.server_address[1]}"
-
-      config = local_connection_config.LocalAgentConfig(
-          workspaces=[workspace_dir],
-          api_key="test-eval-api-key",
-          model=types.ModelTarget(
-              name="gemini-3-flash-preview",
-              endpoint=types.GeminiAPIEndpoint(
-                  base_url=proxy_url,
-                  api_key="test-eval-api-key",
-              ),
-          ),
-      ).eval()
-
-      strategy = config.create_strategy(tool_runner=None, hook_runner=None)
-      async with strategy:
-        conn = strategy.connect()
-        await conn.send("Run echo E2E_EVAL_TEST_OK")
-        steps = [step async for step in conn.receive_steps()]
-
-      # 1. Verify RetryConfig.benchmark() retried the initial 503 error
-      self.assertEqual(server.attempt_counter, 3)
-
-      # 2. Verify HTTP payload tool declarations omit generate_image,
-      # ask_question, and subagent tools while preserving coding tools
-      # and enabling IsDaemon on run_command.
-      first_req_json = server.captured_requests[0]["json"]
-      declared_tools = []
-      run_command_decl = None
-      for tool_group in first_req_json.get("tools", []):
-        for decl in tool_group.get("functionDeclarations", []):
-          declared_tools.append(decl["name"])
-          if decl["name"] == "run_command":
-            run_command_decl = decl
-      self.assertNotIn("generate_image", declared_tools)
-      self.assertNotIn("ask_question", declared_tools)
-      self.assertNotIn("invoke_subagent", declared_tools)
-      self.assertNotIn("define_subagent", declared_tools)
-      self.assertNotIn("manage_subagents", declared_tools)
-      self.assertNotIn("send_message", declared_tools)
-      self.assertIn("run_command", declared_tools)
-      self.assertIsNotNone(run_command_decl)
-      harness_config = strategy._build_harness_config()
-      self.assertTrue(
-          harness_config.harness_side_tools.run_command.enable_daemon_commands
-      )
-      self.assertEqual(
-          harness_config.policy_config.workspace_containment,
-          localharness_pb2.PolicyConfig.WORKSPACE_CONTAINMENT_DISABLED,
-      )
-      self.assertEqual(
-          harness_config.workspaces[0].filesystem_workspace.directory,
-          workspace_dir,
-      )
-      self.assertIn("IsDaemon", json.dumps(run_command_decl))
-      self.assertIn("view_file", declared_tools)
-      self.assertIn("write_to_file", declared_tools)
-      self.assertIn("replace_file_content", declared_tools)
-
-      # 3. Verify System Instructions omit <subagents>, <subagent_reminder>,
-      # and <knowledge_items>.
-      si_parts = first_req_json.get("systemInstruction", {}).get("parts", [])
-      si_text = "\n".join(p.get("text", "") for p in si_parts)
-      self.assertNotIn("<subagents>", si_text)
-      self.assertNotIn("<subagent_reminder>", si_text)
-      self.assertNotIn("<knowledge_items>", si_text)
-
-      # 3b. Verify generationConfig.thinkingConfig defaults to
-      # thinkingLevel=high on the HTTP wire when LocalAgentConfig(...).eval()
-      # is used.
-      self.assertEqual(
-          first_req_json.get("generationConfig", {}).get("thinkingConfig"),
-          {"includeThoughts": True, "thinkingLevel": "high"},
-      )
-
-      # 4. Verify [policy.allow_all()] executed run_command autonomously and
-      # returned the stdout in the subsequent HTTP request's functionResponse.
-      third_req_json = server.captured_requests[2]["json"]
-      fn_responses = []
-      for content in third_req_json.get("contents", []):
-        for part in content.get("parts", []):
-          if "functionResponse" in part:
-            fn_responses.append(part["functionResponse"])
-      self.assertTrue(fn_responses)
-      self.assertIn("E2E_EVAL_TEST_OK", json.dumps(fn_responses))
-      self.assertTrue(
-          any("E2E_EVAL_TEST_OK" in (s.content or "") for s in steps)
-      )
+  def setUp(self):
+    super().setUp()
+    test_utils.patch_default_binary_path(self)
 
   def test_eval_defaults_text_model_thinking_level_high_without_mutating_original(
       self,
@@ -6750,6 +6890,9 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
 
     custom_policies = [policy.deny("run_command"), policy.deny("create_file")]
     budget = types.BudgetConfig()
+    inline_skills = [
+        types.InlineSkill(name="s1", description="d", content="c")
+    ]
 
     class _FakeLiteRTStrategy(local_connection.LocalConnectionStrategy):
 
@@ -6784,6 +6927,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6793,6 +6937,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6801,6 +6946,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
               policies=custom_policies,
               tools=[sample_tool],
               budget_config=budget,
+              inline_skills=inline_skills,
               conversation_id="c" * 32,
               session_continuation_mode=types.SessionContinuationMode.RESUME,
           ),
@@ -6814,6 +6960,7 @@ class LocalAgentConfigEvalE2ETest(unittest.IsolatedAsyncioTestCase):
           self.assertEqual(strategy._policies, custom_policies)
           self.assertEqual(strategy._tools, [sample_tool])
           self.assertEqual(strategy._budget_config, budget)
+          self.assertEqual(strategy._inline_skills, inline_skills)
           self.assertEqual(
               strategy._session_continuation_mode,
               types.SessionContinuationMode.RESUME,

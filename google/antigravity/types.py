@@ -32,6 +32,7 @@ import warnings
 
 import pydantic
 
+from google.antigravity import beta as _beta_lib
 from google.antigravity.models import GeminiAPIEndpoint
 from google.antigravity.models import GeminiModelOptions
 from google.antigravity.models import ModelEndpoint
@@ -56,6 +57,11 @@ __all__ = [
     "CustomSystemInstructions",
     "TemplatedSystemInstructions",
     "SystemInstructions",
+    "InlineSkill",
+    "SubagentInheritSkillsConfig",
+    "SubagentNoneSkillsConfig",
+    "SubagentOverrideSkillsConfig",
+    "SubagentSkillsConfig",
     "SubagentConfig",
     "SubagentCapabilities",
     "AgentBehavior",
@@ -67,6 +73,7 @@ __all__ = [
     "ModelAPIRetryConfig",
     "ModelOutputRetryConfig",
     "RetryConfig",
+    "SandboxStatus",
     "SessionContinuationMode",
     "BaseMcpServerConfig",
     "McpStdioServer",
@@ -262,9 +269,11 @@ class SubagentCapabilities(pydantic.BaseModel):
     subagent_disabled = (
         self.disabled_tools is not None
         and BuiltinTools.START_SUBAGENT in self.disabled_tools
+        and BuiltinTools.RUN_WORKFLOW in self.disabled_tools
     ) or (
         self.enabled_tools is not None
         and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+        and BuiltinTools.RUN_WORKFLOW not in self.enabled_tools
     )
     if subagent_disabled and self.allowed_subagents is not None:
       raise ValueError(
@@ -289,6 +298,102 @@ class SubagentCapabilities(pydantic.BaseModel):
     return self
 
 
+class InlineSkill(pydantic.BaseModel):
+  """Definition of an inline skill.
+
+  Attributes:
+    name: Unique name of the skill (e.g. 'emoji-summarizer').
+    description: Guidance for when the model should select this skill.
+    content: Markdown/text body containing the skill instructions.
+    allowed_tools: Optional list of tool names permitted for this skill.
+    dependent_tools: Optional list of tool names that this skill depends on
+      (loaded dynamically when the skill is looked up).
+    dependent_skills: Optional list of skill names that this skill depends on.
+    metadata: Optional key-value metadata for the skill (e.g. {'visibility':
+      'hidden'}).
+  """
+
+  name: str
+  description: str
+  content: str
+  allowed_tools: list[str] = pydantic.Field(default_factory=list)
+  dependent_tools: list[str] = pydantic.Field(default_factory=list)
+  dependent_skills: list[str] = pydantic.Field(default_factory=list)
+  metadata: dict[str, str] = pydantic.Field(default_factory=dict)
+
+
+class SubagentInheritSkillsConfig(pydantic.BaseModel):
+  """Inherits parent skills, optionally filtered by name or augmented with extra paths.
+
+  Attributes:
+    skill_names: Optional allowlist of skill names inherited from the parent
+      agent. If empty, all parent skills are inherited.
+    extra_skills_paths: Optional additional filesystem paths containing SKILL.md
+      files.
+  """
+
+  skill_names: list[str] = pydantic.Field(default_factory=list)
+  extra_skills_paths: list[str] = pydantic.Field(default_factory=list)
+
+
+class SubagentNoneSkillsConfig(pydantic.BaseModel):
+  """Disables all skills (and lookup_skill) for this subagent."""
+
+
+class SubagentOverrideSkillsConfig(pydantic.BaseModel):
+  """Replaces parent skills with an explicit set of paths and/or inline skills.
+
+  Attributes:
+    skills_paths: Filesystem directories containing SKILL.md files for this
+      subagent.
+    inline_skills: Inline skill definitions scoped exclusively to this subagent.
+  """
+
+  skills_paths: list[str] = pydantic.Field(default_factory=list)
+  inline_skills: list[InlineSkill] = pydantic.Field(default_factory=list)
+
+  @pydantic.model_validator(mode="after")
+  def _validate_non_empty(self) -> "SubagentOverrideSkillsConfig":
+    if not self.skills_paths and not self.inline_skills:
+      raise ValueError(
+          "SubagentOverrideSkillsConfig requires at least one of skills_paths"
+          " or inline_skills to be non-empty. Use SubagentNoneSkillsConfig to"
+          " disable all skills."
+      )
+    return self
+
+
+class SubagentSkillsConfig(pydantic.BaseModel):
+  """Configuration for how a subagent discovers and accesses skills.
+
+  At most one of inherit_config, none_config, or override_config may be set.
+  If unset, the subagent inherits all parent skills by default.
+
+  Attributes:
+    inherit_config: Inherit parent skills (optionally filtered by skill_names).
+    none_config: Disable all skills for this subagent.
+    override_config: Replace parent skills with explicit paths or inline skills.
+  """
+
+  inherit_config: SubagentInheritSkillsConfig | None = None
+  none_config: SubagentNoneSkillsConfig | None = None
+  override_config: SubagentOverrideSkillsConfig | None = None
+
+  @pydantic.model_validator(mode="after")
+  def _validate_oneof(self) -> "SubagentSkillsConfig":
+    set_fields = [
+        f
+        for f in ("inherit_config", "none_config", "override_config")
+        if getattr(self, f) is not None
+    ]
+    if len(set_fields) > 1:
+      raise ValueError(
+          "At most one of inherit_config, none_config, or override_config may"
+          f" be set; got {set_fields}."
+      )
+    return self
+
+
 class SubagentConfig(pydantic.BaseModel):
   """Configuration for a static subagent.
 
@@ -308,6 +413,8 @@ class SubagentConfig(pydantic.BaseModel):
       subagent to run under the given model instead of inheriting the parent
       agent's model. Unlike the agent-level `model`, this accepts a name only:
       subagents always run against the agent-level endpoint.
+    skills_config: Optional configuration for how this subagent discovers and
+      accesses skills (inherit, none, or override).
   """
 
   name: str
@@ -318,6 +425,59 @@ class SubagentConfig(pydantic.BaseModel):
       default_factory=list
   )
   model: str | None = None
+  skills_config: (
+      SubagentSkillsConfig
+      | SubagentInheritSkillsConfig
+      | SubagentNoneSkillsConfig
+      | SubagentOverrideSkillsConfig
+      | None
+  ) = None
+
+  @pydantic.field_validator("skills_config", mode="before")
+  @classmethod
+  def _coerce_skills_config(cls, v: Any) -> Any:
+    if isinstance(v, SubagentInheritSkillsConfig):
+      return SubagentSkillsConfig(inherit_config=v)
+    if isinstance(v, SubagentNoneSkillsConfig):
+      return SubagentSkillsConfig(none_config=v)
+    if isinstance(v, SubagentOverrideSkillsConfig):
+      return SubagentSkillsConfig(override_config=v)
+    if isinstance(v, dict):
+      has_nested = any(
+          k in v for k in ("inherit_config", "none_config", "override_config")
+      )
+      has_inherit = any(k in v for k in ("skill_names", "extra_skills_paths"))
+      has_override = any(k in v for k in ("skills_paths", "inline_skills"))
+      if has_nested and (has_inherit or has_override):
+        raise ValueError(
+            "Cannot mix nested SubagentSkillsConfig keys (inherit_config,"
+            " none_config, override_config) with shorthand keys in the same"
+            " skills_config dict."
+        )
+      if has_nested:
+        return SubagentSkillsConfig.model_validate(v)
+      if has_inherit and has_override:
+        raise ValueError(
+            "Cannot mix SubagentInheritSkillsConfig fields (skill_names,"
+            " extra_skills_paths) and SubagentOverrideSkillsConfig fields"
+            " (skills_paths, inline_skills) in the same skills_config dict."
+        )
+      if has_inherit:
+        return SubagentSkillsConfig(
+            inherit_config=SubagentInheritSkillsConfig.model_validate(v)
+        )
+      if has_override:
+        return SubagentSkillsConfig(
+            override_config=SubagentOverrideSkillsConfig.model_validate(v)
+        )
+      if v:
+        raise ValueError(
+            f"Unrecognized keys in skills_config dict: {sorted(v.keys())}."
+            " Expected either nested keys ('inherit_config', 'none_config',"
+            " 'override_config') or shorthand keys ('skill_names',"
+            " 'extra_skills_paths', 'skills_paths', 'inline_skills')."
+        )
+    return v
 
 
 class BuiltinTools(str, enum.Enum):
@@ -333,6 +493,7 @@ class BuiltinTools(str, enum.Enum):
     RUN_COMMAND: Execute a shell command.
     ASK_QUESTION: Ask the user a clarifying question.
     START_SUBAGENT: Invoke a subagent.
+    RUN_WORKFLOW: Execute a multi-agent workflow script.
     GENERATE_IMAGE: Generate or edit images.
     SEARCH_WEB: Search the web.
     READ_URL_CONTENT: Read content from a URL.
@@ -349,6 +510,7 @@ class BuiltinTools(str, enum.Enum):
   RUN_COMMAND = "run_command"
   ASK_QUESTION = "ask_question"
   START_SUBAGENT = "start_subagent"
+  RUN_WORKFLOW = "run_workflow"
   GENERATE_IMAGE = "generate_image"
   SEARCH_WEB = "search_web"
   READ_URL_CONTENT = "read_url_content"
@@ -386,6 +548,7 @@ class BuiltinTools(str, enum.Enum):
         cls.EDIT_FILE,
         cls.ASK_QUESTION,
         cls.START_SUBAGENT,
+        cls.RUN_WORKFLOW,
         cls.GENERATE_IMAGE,
         cls.SEARCH_WEB,
         cls.READ_URL_CONTENT,
@@ -507,17 +670,17 @@ class CapabilitiesConfig(pydantic.BaseModel):
       overhead for small-context models. Defaults to AgentBehavior.AUTONOMOUS.
     enabled_tools: Explicit allowlist of builtin tools to enable. Mutually
       exclusive with disabled_tools. When None, the harness defaults are used
-      (all tools enabled except ASK_QUESTION, SEARCH_DIR, and FIND_FILE).
-      Disabled tools are removed from the model's context, saving tokens and
-      preventing the model from even considering them.
+      (all tools enabled except ASK_QUESTION, LIST_DIR, SEARCH_DIR, and
+      FIND_FILE). Disabled tools are removed from the model's context, saving
+      tokens and preventing the model from even considering them.
     disabled_tools: Explicit denylist of builtin tools to disable. Mutually
       exclusive with enabled_tools. When specified, the given tools are
-      subtracted from default() (which already excludes ASK_QUESTION,
+      subtracted from default() (which already excludes ASK_QUESTION, LIST_DIR,
       SEARCH_DIR, and FIND_FILE). When None, all default tools are enabled.
       Disabled tools are removed from the model's context, saving tokens and
       preventing the model from even considering them. Note that to enable
-      ASK_QUESTION, SEARCH_DIR, or FIND_FILE, they must be explicitly included
-      in enabled_tools.
+      ASK_QUESTION, LIST_DIR, SEARCH_DIR, or FIND_FILE, they must be explicitly
+      included in enabled_tools.
     compaction_threshold: (Deprecated) Configure
       CompactionConfig(token_threshold=...) directly on AgentConfig instead.
     finish_tool_schema_json: Optional JSON schema string for the finish tool.
@@ -582,10 +745,12 @@ class CapabilitiesConfig(pydantic.BaseModel):
         or (
             self.disabled_tools is not None
             and BuiltinTools.START_SUBAGENT in self.disabled_tools
+            and BuiltinTools.RUN_WORKFLOW in self.disabled_tools
         )
         or (
             self.enabled_tools is not None
             and BuiltinTools.START_SUBAGENT not in self.enabled_tools
+            and BuiltinTools.RUN_WORKFLOW not in self.enabled_tools
         )
     )
     if subagent_disabled:
@@ -731,12 +896,15 @@ class BaseMcpServerConfig(pydantic.BaseModel):
       with enabled_tools. When None, all tools from the server are enabled.
       Disabled tools are removed from the model's context entirely, saving
       tokens and preventing the model from even considering them.
+    force_all_tools_eager: When True, forces all tools from this server to be
+      loaded eagerly into the model's prompt rather than lazily via tool search.
   """
 
   name: Annotated[str, pydantic.Field(pattern=r"^[a-zA-Z0-9_-]+$")]
   timeout_seconds: int | None = None
   enabled_tools: list[str] | None = None
   disabled_tools: list[str] | None = None
+  force_all_tools_eager: bool = False
 
   @pydantic.model_validator(mode="after")
   def _check_mutually_exclusive(self) -> "BaseMcpServerConfig":
@@ -941,7 +1109,14 @@ class UsageMetadata(pydantic.BaseModel):
       return self.__add__(other)
     return NotImplemented
 
-  def __sub__(self, other: UsageMetadata) -> UsageMetadata:
+  def __sub__(self, other: Any) -> UsageMetadata:
+    """Subtracts token counts of another UsageMetadata or returns a copy for 0."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.model_copy()
     if not isinstance(other, UsageMetadata):
       return NotImplemented
     return self.__class__(
@@ -957,6 +1132,25 @@ class UsageMetadata(pydantic.BaseModel):
         - (other.total_token_count or 0),
         service_tier=self.service_tier or other.service_tier,
     )
+
+  def __rsub__(self, other: Any) -> UsageMetadata:
+    """Supports reflected subtraction for numeric 0 identity (0 - u)."""
+    if (
+        isinstance(other, (int, float))
+        and not isinstance(other, bool)
+        and other == 0
+    ):
+      return self.__class__(
+          prompt_token_count=-(self.prompt_token_count or 0),
+          cached_content_token_count=-(self.cached_content_token_count or 0),
+          candidates_token_count=-(self.candidates_token_count or 0),
+          thoughts_token_count=-(self.thoughts_token_count or 0),
+          total_token_count=-(self.total_token_count or 0),
+          service_tier=self.service_tier,
+      )
+    if isinstance(other, UsageMetadata):
+      return other.__sub__(self)
+    return NotImplemented
 
   def __mul__(self, factor: Any) -> UsageMetadata:
     """Scales token counts by a non-negative, finite numeric factor."""
@@ -1133,6 +1327,27 @@ class StopReason(str, enum.Enum):
   QUOTA_EXHAUSTED = "QUOTA_EXHAUSTED"
 
 
+@_beta_lib.beta
+class WorkflowProgress(pydantic.BaseModel):
+  """Progress and output metadata for a `run_workflow` step.
+
+  Attributes:
+    script_path: Path to the Python workflow script being executed (populated
+      when `run_workflow` is invoked with a `.py` script file path, including
+      via `await agent.beta.run_workflow(...)`).
+    script: Inline Python workflow script source (populated when the model
+      invokes `run_workflow` with inline script source during `agent.chat()`).
+    description: Brief description of the workflow run.
+    output: Formatted workflow log and result text produced by the workflow
+      script.
+  """
+
+  script_path: str = ""
+  script: str = ""
+  description: str = ""
+  output: str = ""
+
+
 class Step(pydantic.BaseModel):
   """Structure representing one action in the agent trajectory.
 
@@ -1158,6 +1373,8 @@ class Step(pydantic.BaseModel):
       steps per turn may have this flag set; consumers that want only the last
       response should iterate fully.
     structured_output: The structured output extracted from the finish step.
+    workflow_progress: Workflow script metadata and formatted output when this
+      step is a `run_workflow` tool call.
     usage_metadata: (Deprecated) Token usage for this specific step's model
       invocation. Deprecated in favor of ChatResponse.usage_metadata (turn-level
       usage) and agent.conversation.total_usage (session cumulative usage).
@@ -1180,6 +1397,7 @@ class Step(pydantic.BaseModel):
   error: str = ""
   is_complete_response: bool | None = None
   structured_output: Any | None = None
+  workflow_progress: WorkflowProgress | None = None
   usage_metadata: UsageMetadata | None = pydantic.Field(
       default=None,
       deprecated=(
@@ -1591,6 +1809,98 @@ class ChatResponse:
     """
     if not self._is_done:
       await self._conversation.cancel()
+
+
+async def _empty_chunk_stream() -> (
+    AsyncIterator[StreamChunk | ToolCall | ToolResult]
+):
+  if False:  # pylint: disable=using-constant-test
+    yield
+
+
+@_beta_lib.beta
+class WorkflowResult(ChatResponse):
+  """Final result returned by `await agent.beta.run_workflow(...)`.
+
+  Subclasses `ChatResponse` so all turn-level response accessors
+  (`await result.text()`, `await result.structured_output()`,
+  `await result.resolve()`, `result.chunks`, `result.thoughts`,
+  `result.tool_calls`, `result.usage_metadata`, `result.stop_reason`)
+  are available alongside workflow-specific attributes.
+
+  Attributes:
+    script_path: Path to the Python workflow script executed (when invoked with
+      a script file path).
+    script: Inline Python workflow script source (when invoked with inline
+      script source).
+    description: Brief description of the workflow run.
+    output: Formatted workflow log and result text produced by the workflow
+      script.
+    response_text: Final assistant response text from the workflow turn.
+  """
+
+  script_path: str
+  script: str
+  description: str
+  output: str
+  response_text: str
+
+  def __init__(
+      self,
+      chunk_stream: (
+          AsyncIterator[StreamChunk | ToolCall | ToolResult] | None
+      ) = None,
+      conversation: Any = None,
+      *,
+      script_path: str = "",
+      script: str = "",
+      description: str = "",
+      output: str = "",
+      response_text: str = "",
+  ):
+    super().__init__(
+        chunk_stream=(
+            chunk_stream if chunk_stream is not None else _empty_chunk_stream()
+        ),
+        conversation=conversation,
+    )
+    self.script_path = script_path
+    self.script = script
+    self.description = description
+    self.output = output
+    self.response_text = response_text
+    if chunk_stream is None:
+      self._buffered_chunks = (
+          [Text(step_index=0, text=response_text)] if response_text else []
+      )
+      self._is_done = True
+
+  @classmethod
+  def _from_chat_response(
+      cls,
+      chat_resp: ChatResponse,
+      *,
+      script_path: str = "",
+      script: str = "",
+      description: str = "",
+      output: str = "",
+      response_text: str = "",
+  ) -> "WorkflowResult":
+    """Constructs a `WorkflowResult` preserving `chat_resp` state."""
+    res = cls(
+        chunk_stream=getattr(chat_resp, "_chunk_stream", None),
+        conversation=getattr(chat_resp, "_conversation", None),
+        script_path=script_path,
+        script=script,
+        description=description,
+        output=output,
+        response_text=response_text,
+    )
+    if hasattr(chat_resp, "_buffered_chunks"):
+      res._buffered_chunks = list(chat_resp._buffered_chunks)  # pylint: disable=protected-access
+      res._is_done = getattr(chat_resp, "_is_done", True)  # pylint: disable=protected-access
+      res._stream_error = getattr(chat_resp, "_stream_error", None)  # pylint: disable=protected-access
+    return res
 
 
 # =============================================================================

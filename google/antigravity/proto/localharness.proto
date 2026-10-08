@@ -17,6 +17,7 @@ edition = "2024";
 package antigravity.localharness;
 
 import "google/antigravity/proto/content.proto";
+import "google/antigravity/proto/skill.proto";
 
 enum LifecycleHook {
   LIFECYCLE_HOOK_UNSPECIFIED = 0;
@@ -182,6 +183,13 @@ message SystemInstructions {
     .antigravity.localharness.CustomSystemInstructions custom = 1;
     .antigravity.localharness.AppendedSystemInstructions appended = 2;
   }
+  repeated .antigravity.localharness.TemplateOverride overrides = 3;
+}
+message TemplateOverride {
+  string title = 1;
+  string text = 2;
+  bool remove = 3;
+  repeated .antigravity.localharness.SystemInstructionTemplate si_template = 4;
 }
 message CustomSystemInstructions {
   message Part {
@@ -236,6 +244,7 @@ message HarnessSideTools {
   .antigravity.localharness.ToolSearchConfig tool_search_config = 15;
   .antigravity.localharness.ManageTaskToolConfig manage_task = 16;
   .antigravity.localharness.ScheduleToolConfig schedule = 17;
+  .antigravity.localharness.RunWorkflowToolConfig run_workflow = 20;
   extensions 1000 to 1999;
   extensions 2000 to max;
 }
@@ -290,8 +299,10 @@ message ToolSearchConfig {
   extensions 1000 to max;
 }
 message SkillSource {
-  reserved 1;
-  string directory_path = 2;
+  oneof source {
+    .genai.skills.Skill skill = 1;
+    string directory_path = 2;
+  }
 }
 message SkillsConfig {
   bool enabled = 1 [default = true];
@@ -302,6 +313,10 @@ message ManageTaskToolConfig {
 }
 message ScheduleToolConfig {
   bool enabled = 1;
+}
+message RunWorkflowToolConfig {
+  bool enabled = 1;
+  .antigravity.localharness.ToolExecutionMode execution_mode = 2;
 }
 message PermissionsConfig {
   bool enforce_workspace_validation = 1;
@@ -387,6 +402,7 @@ message StepUpdate {
   .antigravity.localharness.ActionReadUrlContent read_url_content = 35;
   .antigravity.localharness.ActionCustomTool custom_tool = 36;
   .antigravity.localharness.ActionSkillLookup skill_lookup = 37;
+  .antigravity.localharness.ActionRunWorkflow run_workflow = 38;
   string request_text = 50;
   .antigravity.localharness.ToolConfirmationRequest tool_confirmation_request =
       51;
@@ -533,6 +549,7 @@ message TrajectoryStateUpdate {
     STATE_FULLY_IDLE = 2;
     STATE_CANCELLED = 3;
     STATE_WAITING_FOR_TASKS = 4;
+    STATE_WAITING_FOR_SUBAGENTS = 5;
   }
   enum StopReason {
     STOP_REASON_UNSPECIFIED = 0;
@@ -639,6 +656,7 @@ message McpServerConfig {
   .antigravity.localharness.McpServerConfig.AuthProviderType
       auth_provider_type = 6;
   int32 timeout_seconds = 7;
+  bool force_all_tools_eager = 10;
 }
 message McpStdioTransport {
   string command = 1;
@@ -669,6 +687,12 @@ message ActionSkillLookup {
   repeated string requested_skill_names = 2;
   repeated string resolved_skill_names = 3;
   string error_message = 4;
+}
+message ActionRunWorkflow {
+  string script_path = 1;
+  string description = 2;
+  string output = 3;
+  string script = 4;
 }
 message CallHookRequest {
   oneof args {
@@ -781,6 +805,7 @@ message SubagentSkillsConfig {
   message NoneConfig {}
   message OverrideConfig {
     repeated string skills_paths = 1;
+    repeated .antigravity.localharness.SkillSource skill_sources = 2;
   }
   oneof mode {
     .antigravity.localharness.SubagentSkillsConfig.InheritConfig
@@ -805,6 +830,7 @@ message CustomAgent {
 message ToolOutputTruncation {
   message TruncateStrategy {
     int32 max_tokens = 1;
+    bool save_full_output = 2;
   }
   message ErrorStrategy {
     int32 max_tokens = 1;
@@ -868,4 +894,5 @@ message CompactionConfig {
   uint32 token_threshold = 1;
   uint32 checkpoint_interval_tokens = 2;
   uint32 max_context_tokens = 3;
+  string summary_prompt_override = 4;
 }

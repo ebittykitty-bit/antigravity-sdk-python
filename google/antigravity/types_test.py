@@ -620,6 +620,7 @@ class BuiltinToolsTest(parameterized.TestCase):
           "read_url_content",
       ),
       ("start_subagent", types.BuiltinTools.START_SUBAGENT, "start_subagent"),
+      ("run_workflow", types.BuiltinTools.RUN_WORKFLOW, "run_workflow"),
       ("generate_image", types.BuiltinTools.GENERATE_IMAGE, "generate_image"),
       ("schedule", types.BuiltinTools.SCHEDULE, "schedule"),
       ("finish", types.BuiltinTools.FINISH, "finish"),
@@ -654,6 +655,7 @@ class BuiltinToolsTest(parameterized.TestCase):
         types.BuiltinTools.RUN_COMMAND,
         types.BuiltinTools.ASK_QUESTION,
         types.BuiltinTools.START_SUBAGENT,
+        types.BuiltinTools.RUN_WORKFLOW,
         types.BuiltinTools.GENERATE_IMAGE,
         types.BuiltinTools.SEARCH_WEB,
     }
@@ -946,19 +948,25 @@ class CapabilitiesConfigTest(unittest.TestCase):
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
 
   def test_max_subagent_depth_fails_when_start_subagent_tool_disabled(self):
-    """Verifies ValidationError when START_SUBAGENT is in disabled_tools."""
+    """Verifies ValidationError when START_SUBAGENT and RUN_WORKFLOW are in disabled_tools."""
     with self.assertRaises(pydantic.ValidationError) as cm:
       types.CapabilitiesConfig(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           max_subagent_depth=3,
       )
     self.assertIn("max_subagent_depth cannot be configured", str(cm.exception))
 
   def test_allowed_subagents_fails_when_start_subagent_tool_disabled(self):
-    """Verifies ValidationError when START_SUBAGENT is in disabled_tools and allowed_subagents is set."""
+    """Verifies ValidationError when START_SUBAGENT and RUN_WORKFLOW are in disabled_tools and allowed_subagents is set."""
     with self.assertRaises(pydantic.ValidationError) as cm:
       types.CapabilitiesConfig(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           allowed_subagents=["worker"],
       )
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
@@ -984,6 +992,38 @@ class CapabilitiesConfigTest(unittest.TestCase):
           allowed_subagents=["worker"],
       )
     self.assertIn("allowed_subagents cannot be specified", str(cm.exception))
+
+  def test_run_workflow_in_enabled_tools_permits_subagent_options(self):
+    """Verifies RUN_WORKFLOW in enabled_tools permits allowed_subagents and max_subagent_depth."""
+    cfg = types.CapabilitiesConfig(
+        enabled_tools=[types.BuiltinTools.RUN_WORKFLOW],
+        max_subagent_depth=2,
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(cfg.max_subagent_depth, 2)
+    self.assertEqual(cfg.allowed_subagents, ["worker"])
+    sub_caps = types.SubagentCapabilities(
+        enabled_tools=[types.BuiltinTools.RUN_WORKFLOW],
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(sub_caps.allowed_subagents, ["worker"])
+
+  def test_disabling_only_start_subagent_permits_subagent_options_for_run_workflow(
+      self,
+  ):
+    """Verifies disabling START_SUBAGENT while leaving RUN_WORKFLOW enabled permits subagent options."""
+    cfg = types.CapabilitiesConfig(
+        disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        max_subagent_depth=2,
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(cfg.max_subagent_depth, 2)
+    self.assertEqual(cfg.allowed_subagents, ["worker"])
+    sub_caps = types.SubagentCapabilities(
+        disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+        allowed_subagents=["worker"],
+    )
+    self.assertEqual(sub_caps.allowed_subagents, ["worker"])
 
   def test_subagent_ask_question_warning_when_not_interactive(self):
     """Verifies that a warning is logged for SubagentCapabilities."""
@@ -1857,6 +1897,53 @@ class ChatResponseStreamTest(unittest.IsolatedAsyncioTestCase):
     )
     self.assertEqual(await response.text(), "")
 
+  async def test_workflow_result_subclasses_chat_response(self):
+    """Verifies WorkflowResult subclasses ChatResponse and preserves turn accessors."""
+    direct = types.WorkflowResult(
+        script_path="/tmp/wf.py",
+        description="Run wf",
+        output="phase 1: ok",
+        response_text="All done.",
+    )
+    self.assertIsInstance(direct, types.ChatResponse)
+    self.assertEqual(direct.script_path, "/tmp/wf.py")
+    self.assertEqual(direct.description, "Run wf")
+    self.assertEqual(direct.output, "phase 1: ok")
+    self.assertEqual(direct.response_text, "All done.")
+    self.assertEqual(await direct.text(), "All done.")
+
+    async def mock_stream():
+      yield types.Thought(step_index=1, text="thinking...")
+      yield types.Text(step_index=2, text="Final summary.")
+
+    mock_conv = mock.MagicMock(spec=conversation.Conversation)
+    mock_conv.get_last_structured_output.return_value = {"passed": True}
+    mock_conv.last_turn_usage = types.UsageMetadata(
+        prompt_token_count=10,
+        candidates_token_count=5,
+        total_token_count=15,
+    )
+    mock_conv._last_turn_stop_reason = types.StopReason.UNSPECIFIED
+
+    chat_resp = types.ChatResponse(mock_stream(), conversation=mock_conv)
+    response_text = await chat_resp.text()
+    wf_res = types.WorkflowResult._from_chat_response(
+        chat_resp,
+        script_path="/tmp/wf.py",
+        description="Run wf",
+        output="phase 1: ok",
+        response_text=response_text,
+    )
+    self.assertIsInstance(wf_res, types.ChatResponse)
+    self.assertEqual(wf_res.output, "phase 1: ok")
+    self.assertEqual(wf_res.response_text, "Final summary.")
+    self.assertEqual(await wf_res.text(), "Final summary.")
+    self.assertEqual(await wf_res.structured_output(), {"passed": True})
+    self.assertEqual([t async for t in wf_res.thoughts], ["thinking..."])
+    self.assertIsNotNone(wf_res.usage_metadata)
+    self.assertEqual(wf_res.usage_metadata.total_token_count, 15)
+    self.assertEqual(wf_res.stop_reason, types.StopReason.UNSPECIFIED)
+
 
 class McpServerConfigTest(parameterized.TestCase):
   """Validates the McpServerConfig Pydantic models and required fields."""
@@ -1971,6 +2058,28 @@ class McpServerConfigTest(parameterized.TestCase):
           },
           "disabled_tools",
           ["tool2"],
+      ),
+      (
+          "stdio_force_eager",
+          types.McpStdioServer,
+          {
+              "name": "stdio_server",
+              "command": "node",
+              "force_all_tools_eager": True,
+          },
+          "force_all_tools_eager",
+          True,
+      ),
+      (
+          "http_force_eager",
+          types.McpStreamableHttpServer,
+          {
+              "name": "http_server",
+              "url": "http://localhost/http",
+              "force_all_tools_eager": True,
+          },
+          "force_all_tools_eager",
+          True,
       ),
   )
   def test_server_construction_with_filtering(
@@ -2130,7 +2239,10 @@ class SubagentCapabilitiesTest(unittest.TestCase):
         pydantic.ValidationError, "START_SUBAGENT is disabled or omitted"
     ):
       types.SubagentCapabilities(
-          disabled_tools=[types.BuiltinTools.START_SUBAGENT],
+          disabled_tools=[
+              types.BuiltinTools.START_SUBAGENT,
+              types.BuiltinTools.RUN_WORKFLOW,
+          ],
           allowed_subagents=["worker"],
       )
 
@@ -2194,6 +2306,29 @@ class SubagentConfigTest(unittest.TestCase):
           description="helpful agent",
           model=types.ModelTarget(name="gemini-2.5-pro"),
       )
+
+
+class SandboxStatusTest(unittest.TestCase):
+  """Tests for the SandboxStatus model."""
+
+  def test_construction_defaults(self):
+    status = types.SandboxStatus(available=True)
+    self.assertTrue(status.available)
+    self.assertIsNone(status.unavailable_reason)
+
+  def test_construction_with_reason(self):
+    status = types.SandboxStatus(
+        available=False,
+        unavailable_reason="Sandbox not supported on current platform",
+    )
+    self.assertFalse(status.available)
+    self.assertEqual(
+        status.unavailable_reason,
+        "Sandbox not supported on current platform",
+    )
+
+  def test_is_exported_in_all(self):
+    self.assertIn("SandboxStatus", types.__all__)
 
 
 class UsageMetadataTest(unittest.TestCase):
@@ -2311,10 +2446,92 @@ class UsageMetadataTest(unittest.TestCase):
     self.assertEqual((u_pri - u_std).service_tier, types.ServiceTier.PRIORITY)
     self.assertIsNone((u_none - u_none).service_tier)
 
+  def test_sub_operator_zero_identity(self):
+    """Verifies that u - 0 returns an independent copy of u."""
+    u = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    res = u - 0
+    self.assertEqual(res, u)
+    self.assertIsNot(res, u)
+
+    res_float = u - 0.0
+    self.assertEqual(res_float, u)
+    self.assertIsNot(res_float, u)
+
   def test_sub_operator_invalid_type(self):
     """Verifies that __sub__ returns NotImplemented for invalid types."""
     u = types.UsageMetadata(prompt_token_count=10)
     self.assertEqual(u.__sub__(1), NotImplemented)
+    self.assertEqual(u.__sub__("invalid"), NotImplemented)
+    self.assertEqual(u.__sub__(False), NotImplemented)
+    self.assertEqual(u.__sub__(True), NotImplemented)
+
+    with self.assertRaises(TypeError):
+      _ = u - 1
+    with self.assertRaises(TypeError):
+      _ = u - "invalid"
+    with self.assertRaises(TypeError):
+      _ = u - False
+    with self.assertRaises(TypeError):
+      _ = u - True
+
+  def test_rsub_operator(self):
+    """Verifies that __rsub__ and numeric 0 identity work as expected."""
+    u = types.UsageMetadata(
+        prompt_token_count=100,
+        cached_content_token_count=50,
+        candidates_token_count=30,
+        thoughts_token_count=20,
+        total_token_count=150,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    # 0 - u negates all token counts
+    neg = 0 - u
+    self.assertEqual(neg.prompt_token_count, -100)
+    self.assertEqual(neg.cached_content_token_count, -50)
+    self.assertEqual(neg.candidates_token_count, -30)
+    self.assertEqual(neg.thoughts_token_count, -20)
+    self.assertEqual(neg.total_token_count, -150)
+    self.assertEqual(neg.service_tier, types.ServiceTier.PRIORITY)
+
+    # 0.0 - u behaves identically
+    neg_float = 0.0 - u
+    self.assertEqual(neg_float.prompt_token_count, -100)
+    self.assertEqual(neg_float.total_token_count, -150)
+
+    # Direct __rsub__ between UsageMetadata instances delegating to
+    # other.__sub__(self).
+    u_other = types.UsageMetadata(
+        prompt_token_count=300,
+        cached_content_token_count=60,
+        candidates_token_count=70,
+        thoughts_token_count=25,
+        total_token_count=395,
+        service_tier=types.ServiceTier.PRIORITY,
+    )
+    self.assertEqual(u.__rsub__(u_other), u_other - u)
+
+    # Invalid types: direct dunder returns NotImplemented
+    self.assertEqual(u.__rsub__("invalid"), NotImplemented)
+    self.assertEqual(u.__rsub__(1), NotImplemented)
+    self.assertEqual(u.__rsub__(False), NotImplemented)
+    self.assertEqual(u.__rsub__(True), NotImplemented)
+
+    # Operator expressions raise TypeError
+    with self.assertRaises(TypeError):
+      _ = 1 - u
+    with self.assertRaises(TypeError):
+      _ = "invalid" - u
+    with self.assertRaises(TypeError):
+      _ = False - u
+    with self.assertRaises(TypeError):
+      _ = True - u
 
   def test_radd_operator(self):
     """Verifies that __radd__ and 0 identity work as expected."""
@@ -2649,6 +2866,276 @@ class StopHookTypesTest(absltest.TestCase):
     })
     self.assertEqual(args.response_text, "done")
     self.assertEqual(args.stop_reason, types.StopReason.QUOTA_EXHAUSTED)
+
+
+class SubagentSkillsConfigTest(unittest.TestCase):
+  """Validates SubagentSkillsConfig and SubagentConfig.skills_config."""
+
+  def test_subagent_skills_config_oneof_valid(self):
+    cfg_empty = types.SubagentSkillsConfig()
+    self.assertIsNone(cfg_empty.inherit_config)
+    self.assertIsNone(cfg_empty.none_config)
+    self.assertIsNone(cfg_empty.override_config)
+
+    cfg_inherit = types.SubagentSkillsConfig(
+        inherit_config=types.SubagentInheritSkillsConfig(
+            skill_names=["format_ghidra"],
+            extra_skills_paths=["/tmp/skills"],
+        )
+    )
+    self.assertIsNotNone(cfg_inherit.inherit_config)
+    self.assertEqual(cfg_inherit.inherit_config.skill_names, ["format_ghidra"])
+    self.assertEqual(
+        cfg_inherit.inherit_config.extra_skills_paths, ["/tmp/skills"]
+    )
+
+    cfg_none = types.SubagentSkillsConfig(
+        none_config=types.SubagentNoneSkillsConfig()
+    )
+    self.assertIsNotNone(cfg_none.none_config)
+
+    cfg_override = types.SubagentSkillsConfig(
+        override_config=types.SubagentOverrideSkillsConfig(
+            skills_paths=["/custom/skills"],
+            inline_skills=[
+                types.InlineSkill(
+                    name="re_skill",
+                    description="RE skill",
+                    content="# RE instructions",
+                )
+            ],
+        )
+    )
+    self.assertIsNotNone(cfg_override.override_config)
+    self.assertEqual(len(cfg_override.override_config.inline_skills), 1)
+    self.assertEqual(
+        cfg_override.override_config.inline_skills[0].name, "re_skill"
+    )
+
+  def test_subagent_override_skills_config_empty_rejected(self):
+    with self.assertRaisesRegex(
+        ValueError, "requires at least one of skills_paths or inline_skills"
+    ):
+      types.SubagentOverrideSkillsConfig()
+
+  def test_subagent_skills_config_oneof_violation(self):
+    inherit = types.SubagentInheritSkillsConfig()
+    none = types.SubagentNoneSkillsConfig()
+    override = types.SubagentOverrideSkillsConfig(skills_paths=["/skills"])
+
+    for kwargs in (
+        {"inherit_config": inherit, "none_config": none},
+        {"inherit_config": inherit, "override_config": override},
+        {"none_config": none, "override_config": override},
+        {
+            "inherit_config": inherit,
+            "none_config": none,
+            "override_config": override,
+        },
+    ):
+      expected_fields = list(kwargs.keys())
+      with self.subTest(kwargs=expected_fields):
+        with self.assertRaises(ValueError) as ctx:
+          types.SubagentSkillsConfig(**kwargs)
+        self.assertIn(f"got {expected_fields}", str(ctx.exception))
+
+  def test_subagent_config_coercion(self):
+    sub_inherit = types.SubagentConfig(
+        name="sub1",
+        description="desc",
+        skills_config=types.SubagentInheritSkillsConfig(
+            skill_names=["format_ghidra"]
+        ),
+    )
+    self.assertIsInstance(sub_inherit.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_inherit.skills_config.inherit_config)
+    self.assertEqual(
+        sub_inherit.skills_config.inherit_config.skill_names, ["format_ghidra"]
+    )
+
+    sub_none = types.SubagentConfig(
+        name="sub2",
+        description="desc",
+        skills_config=types.SubagentNoneSkillsConfig(),
+    )
+    self.assertIsInstance(sub_none.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_none.skills_config.none_config)
+
+    sub_override = types.SubagentConfig(
+        name="sub3",
+        description="desc",
+        skills_config=types.SubagentOverrideSkillsConfig(
+            skills_paths=["/skills"]
+        ),
+    )
+    self.assertIsInstance(
+        sub_override.skills_config, types.SubagentSkillsConfig
+    )
+    self.assertIsNotNone(sub_override.skills_config.override_config)
+    self.assertEqual(
+        sub_override.skills_config.override_config.skills_paths, ["/skills"]
+    )
+
+    sub_direct = types.SubagentConfig(
+        name="sub4",
+        description="desc",
+        skills_config=types.SubagentSkillsConfig(
+            none_config=types.SubagentNoneSkillsConfig()
+        ),
+    )
+    self.assertIsInstance(sub_direct.skills_config, types.SubagentSkillsConfig)
+    self.assertIsNotNone(sub_direct.skills_config.none_config)
+
+    sub_dict_inherit_names = types.SubagentConfig.model_validate({
+        "name": "sub5a",
+        "description": "desc",
+        "skills_config": {"skill_names": ["format_ghidra"]},
+    })
+    self.assertEqual(
+        sub_dict_inherit_names.skills_config.inherit_config.skill_names,
+        ["format_ghidra"],
+    )
+
+    sub_dict_inherit_paths = types.SubagentConfig.model_validate({
+        "name": "sub5b",
+        "description": "desc",
+        "skills_config": {"extra_skills_paths": ["/extra"]},
+    })
+    self.assertEqual(
+        sub_dict_inherit_paths.skills_config.inherit_config.extra_skills_paths,
+        ["/extra"],
+    )
+
+    sub_dict_override_paths = types.SubagentConfig.model_validate({
+        "name": "sub6a",
+        "description": "desc",
+        "skills_config": {"skills_paths": ["/skills"]},
+    })
+    self.assertEqual(
+        sub_dict_override_paths.skills_config.override_config.skills_paths,
+        ["/skills"],
+    )
+
+    sub_dict_override_inline = types.SubagentConfig.model_validate({
+        "name": "sub6b",
+        "description": "desc",
+        "skills_config": {
+            "inline_skills": [{"name": "s", "description": "d", "content": "c"}]
+        },
+    })
+    self.assertEqual(
+        len(
+            sub_dict_override_inline.skills_config.override_config.inline_skills
+        ),
+        1,
+    )
+
+    sub_dict_nested_inherit = types.SubagentConfig.model_validate({
+        "name": "sub7a",
+        "description": "desc",
+        "skills_config": {"inherit_config": {"skill_names": ["a"]}},
+    })
+    self.assertEqual(
+        sub_dict_nested_inherit.skills_config.inherit_config.skill_names, ["a"]
+    )
+
+    sub_dict_nested_none = types.SubagentConfig.model_validate({
+        "name": "sub7b",
+        "description": "desc",
+        "skills_config": {"none_config": {}},
+    })
+    self.assertIsNotNone(sub_dict_nested_none.skills_config.none_config)
+
+    sub_dict_nested_override = types.SubagentConfig.model_validate({
+        "name": "sub7c",
+        "description": "desc",
+        "skills_config": {"override_config": {"skills_paths": ["/s"]}},
+    })
+    self.assertEqual(
+        sub_dict_nested_override.skills_config.override_config.skills_paths,
+        ["/s"],
+    )
+
+    with self.assertRaisesRegex(ValueError, "Cannot mix"):
+      types.SubagentConfig.model_validate({
+          "name": "sub_mixed_shorthand",
+          "description": "desc",
+          "skills_config": {
+              "skill_names": ["a"],
+              "skills_paths": ["/skills"],
+          },
+      })
+
+    with self.assertRaisesRegex(ValueError, "Cannot mix nested"):
+      types.SubagentConfig.model_validate({
+          "name": "sub_mixed_nested_and_shorthand",
+          "description": "desc",
+          "skills_config": {
+              "inherit_config": {"skill_names": ["a"]},
+              "skills_paths": ["/skills"],
+          },
+      })
+
+    with self.assertRaisesRegex(
+        ValueError, "At most one of inherit_config, none_config"
+    ):
+      types.SubagentConfig.model_validate({
+          "name": "sub_nested_oneof_violation",
+          "description": "desc",
+          "skills_config": {
+              "inherit_config": {},
+              "none_config": {},
+          },
+      })
+
+    with self.assertRaisesRegex(
+        ValueError, "Unrecognized keys in skills_config dict"
+    ):
+      types.SubagentConfig.model_validate({
+          "name": "sub_unrecognized_keys",
+          "description": "desc",
+          "skills_config": {"skills_path": ["/skills"]},
+      })
+
+
+class InlineSkillTest(absltest.TestCase):
+  """Tests for InlineSkill."""
+
+  def test_defaults(self):
+    skill = types.InlineSkill(
+        name="code-formatter",
+        description="Formats source files.",
+        content="# Formatting Rules",
+    )
+    self.assertEqual(skill.name, "code-formatter")
+    self.assertEqual(skill.description, "Formats source files.")
+    self.assertEqual(skill.content, "# Formatting Rules")
+    self.assertEqual(skill.allowed_tools, [])
+    self.assertEqual(skill.dependent_tools, [])
+    self.assertEqual(skill.dependent_skills, [])
+    self.assertEqual(skill.metadata, {})
+
+  def test_custom_fields(self):
+    skill = types.InlineSkill(
+        name="binary-triage",
+        description="Analyzes ELF binaries.",
+        content="# Binary Triage",
+        allowed_tools=["view_file"],
+        dependent_tools=["ghidra_decompile"],
+        dependent_skills=["elf-headers"],
+        metadata={"visibility": "hidden"},
+    )
+    self.assertEqual(skill.allowed_tools, ["view_file"])
+    self.assertEqual(skill.dependent_tools, ["ghidra_decompile"])
+    self.assertEqual(skill.dependent_skills, ["elf-headers"])
+    self.assertEqual(skill.metadata, {"visibility": "hidden"})
+
+  def test_missing_required_fields_raises(self):
+    with self.assertRaises(pydantic.ValidationError):
+      types.InlineSkill(  # pytype: disable=missing-parameter
+          name="incomplete",
+          description="missing content",
+      )
 
 
 if __name__ == "__main__":

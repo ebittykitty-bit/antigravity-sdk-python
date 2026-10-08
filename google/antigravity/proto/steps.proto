@@ -265,15 +265,11 @@ message LegacyVideoContent {
   string name = 16;
 }
 message UserInputStep {
-  message SlashCommand {
-    string name = 1;
-  }
   oneof content {
     option (gaos.parsing.is_union) = true;
 
     .genai.ContentList content_list = 2;
     string content_string = 3;
-    .genai.UserInputStep.SlashCommand slash_command = 4;
   }
 }
 message ModelOutputStep {
